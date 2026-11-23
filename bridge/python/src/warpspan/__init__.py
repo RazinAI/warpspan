@@ -3,15 +3,15 @@
 Publishes the active OpenTelemetry span of each thread to libwarpspan.so, so
 GPU kernels launched while a span is active are linked to that span.
 
-Usually enabled without code changes by putting ``bridge/python/autoload`` and
-``bridge/python/src`` on ``PYTHONPATH`` (see the README). It can also be
-enabled explicitly::
+It enables itself without code changes, either through ``opentelemetry-instrument``
+(when this package is installed) or through ``bridge/python/autoload`` on
+``PYTHONPATH``. Explicitly::
 
     import warpspan
     warpspan.install()
 """
 
-from ._bridge import current_span, install, is_installed, uninstall
+from ._bridge import install
 
-__all__ = ["install", "uninstall", "is_installed", "current_span"]
+__all__ = ["install"]
 __version__ = "0.1.0"

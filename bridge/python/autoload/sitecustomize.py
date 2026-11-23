@@ -1,39 +1,36 @@
 """Enable the warpspan span bridge at Python startup, with no app changes.
 
-Python imports the first ``sitecustomize`` module it finds on ``sys.path``
-while starting up. Putting this directory (and ``bridge/python/src``) on
-``PYTHONPATH`` therefore installs the bridge before the app's code runs.
+Python imports the first ``sitecustomize`` module on ``sys.path`` at startup,
+so putting this directory (and ``bridge/python/src``) first on ``PYTHONPATH``
+installs the bridge before the app's code runs. Only one ``sitecustomize`` is
+ever imported, so afterwards we run the next one on ``sys.path`` too.
 
-Only one ``sitecustomize`` is ever imported, so afterwards we run the next one
-on ``sys.path`` (e.g. the one ``opentelemetry-instrument`` adds) to avoid
-breaking other tools that rely on the same mechanism.
+Not needed with ``opentelemetry-instrument``: it prepends its own
+``sitecustomize`` (which does not chain), but it calls the
+``opentelemetry_pre_instrument`` entry point of the installed ``warpspan``
+package instead.
 """
 
 
 def _warpspan_autoload() -> None:
+    import importlib.util
     import os
     import sys
 
-    if os.environ.get("CUDA_INJECTION64_PATH") or os.environ.get("WARPSPAN_LIBRARY"):
+    if os.environ.get("CUDA_INJECTION64_PATH"):
         try:
             import warpspan
 
             warpspan.install()
         except Exception as e:  # never break app startup
-            print(f"warpspan: python bridge disabled: {e}", file=sys.stderr)
-
-    import importlib.util
+            print(f"warpspan: python span bridge disabled: {e}", file=sys.stderr)
 
     here = os.path.dirname(os.path.abspath(__file__))
-    seen_self = False
-    for entry in list(sys.path):
-        entry_abs = os.path.abspath(entry or os.getcwd())
-        if entry_abs == here:
-            seen_self = True
-            continue
-        if not seen_self:
-            continue
-        candidate = os.path.join(entry_abs, "sitecustomize.py")
+    entries = [os.path.abspath(p or os.getcwd()) for p in sys.path]
+    if here not in entries:
+        return
+    for entry in entries[entries.index(here) + 1 :]:
+        candidate = os.path.join(entry, "sitecustomize.py")
         if os.path.isfile(candidate):
             spec = importlib.util.spec_from_file_location("_warpspan_next_sitecustomize", candidate)
             if spec and spec.loader:
@@ -43,7 +40,7 @@ def _warpspan_autoload() -> None:
                     spec.loader.exec_module(module)
                 except Exception as e:
                     print(f"warpspan: error in {candidate}: {e}", file=sys.stderr)
-            break
+            return
 
 
 _warpspan_autoload()

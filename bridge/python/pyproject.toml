@@ -9,6 +9,10 @@ description = "Span bridge linking OpenTelemetry spans to GPU kernels captured b
 requires-python = ">=3.9"
 dependencies = ["opentelemetry-api>=1.20"]
 
+# opentelemetry-instrument calls these before instrumenting the app.
+[project.entry-points.opentelemetry_pre_instrument]
+warpspan = "warpspan:install"
+
 [project.optional-dependencies]
 test = ["pytest", "opentelemetry-sdk>=1.20"]
 
