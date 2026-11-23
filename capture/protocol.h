@@ -20,7 +20,7 @@ enum MessageType : uint16_t {
 };
 
 // Every message (one SOCK_SEQPACKET datagram):
-//   u32 magic | u16 version | u16 type | u32 payload_len | u32 reserved
+//   u32 magic | u16 version | u16 type | u32 payload_len | u32 pid
 constexpr size_t kHeaderSize = 16;
 
 // Keep messages well below the default unix socket buffer (~208 KiB).
@@ -29,15 +29,11 @@ constexpr size_t kMaxMessage = 60 * 1024;
 // Kernels payload:
 //   u64 dropped_total | u32 string_count | u32 record_count
 //   string_count x (u16 len | bytes)
-//   record_count x KernelRecord (kKernelRecordSize bytes, layout below)
+//   record_count x record:
+//     u64 start_ns | u64 end_ns | u8 trace_id[16] | u8 span_id[8] | u32 name_index | u32 device_id
+// A record is linked to a span iff span_id is non-zero.
 constexpr size_t kKernelsFixedSize = 16;
-
-// KernelRecord:
-//   u64 start_ns | u64 end_ns | u8 trace_id[16] | u8 span_id[8]
-//   u32 correlation_id | u32 name_index | u32 device_id | u32 stream_id
-//   u32 thread_id | u32 flags
-constexpr size_t kKernelRecordSize = 64;
-constexpr uint32_t kFlagLinked = 1u << 0;  // trace_id/span_id are valid
+constexpr size_t kKernelRecordSize = 48;
 
 constexpr size_t kMaxStringLen = 2048;  // longer kernel names are truncated
 

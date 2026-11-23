@@ -26,6 +26,8 @@ STATIC_CXX ?= 1
 CXXFLAGS ?= -O2 -g
 CXXFLAGS += -std=c++17 -Wall -Wextra -fPIC -fvisibility=hidden -fno-exceptions -fno-rtti \
             -I$(CUPTI_INC_DIR) -I$(CUDA_HOME)/include
+# RUNPATH: $ORIGIN first (the inject image ships libcupti next to the .so), then
+# the build machine's CUPTI dir so a local build works without LD_LIBRARY_PATH.
 LDFLAGS  += -shared -Wl,-z,defs -Wl,--exclude-libs,ALL -Wl,--version-script=exports.map \
             -L$(CUPTI_LIB_DIR) -Wl,-rpath,'$$ORIGIN' -Wl,-rpath,$(CUPTI_LIB_DIR)
 LDLIBS   += -lcupti -lpthread

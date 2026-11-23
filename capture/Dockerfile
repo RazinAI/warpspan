@@ -9,11 +9,12 @@
 #     --build-arg CUDA_IMAGE=nvidia/cuda:12.6.3-devel-ubuntu20.04 .
 ARG CUDA_IMAGE=nvidia/cuda:12.6.3-devel-ubuntu20.04
 FROM ${CUDA_IMAGE} AS build
+# STATIC_CXX=0 if the toolchain's libstdc++.a is not built with -fPIC.
+ARG STATIC_CXX=1
 RUN apt-get update && apt-get install -y --no-install-recommends make g++ && rm -rf /var/lib/apt/lists/*
 WORKDIR /src/capture
 COPY capture/ .
-# Static libstdc++ first; fall back to dynamic if the toolchain's libstdc++.a isn't PIC.
-RUN make CUDA_HOME=/usr/local/cuda || (make clean && make CUDA_HOME=/usr/local/cuda STATIC_CXX=0)
+RUN make CUDA_HOME=/usr/local/cuda STATIC_CXX=${STATIC_CXX}
 # Ship the exact libcupti soname the .so needs next to it (found via RUNPATH $ORIGIN),
 # because most app images contain the CUDA runtime but not CUPTI.
 RUN mkdir -p /out/python \
