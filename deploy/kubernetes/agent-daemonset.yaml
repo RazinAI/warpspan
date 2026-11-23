@@ -35,12 +35,17 @@ spec:
           image: ghcr.io/zraisan/warpspan-agent:0.1.0
           args:
             - --socket=/var/run/warpspan/warpspan.sock
-            - --otlp-endpoint=otel-collector.observability.svc:4317
+            - --otlp-endpoint=http://otel-collector.observability.svc:4317
           env:
             - name: NODE_NAME
               valueFrom:
                 fieldRef:
                   fieldPath: spec.nodeName
+          securityContext:
+            allowPrivilegeEscalation: false
+            readOnlyRootFilesystem: true
+            capabilities:
+              drop: [ALL]
           volumeMounts:
             - name: run
               mountPath: /var/run/warpspan

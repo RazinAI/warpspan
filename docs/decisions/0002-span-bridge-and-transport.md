@@ -16,11 +16,14 @@ thread, so it reads the same thread-local with no locks.
 
 The Python bridge wraps `opentelemetry.context._RUNTIME_CONTEXT` and calls
 `warpspan_set_span` after every `attach` / `detach`, so it tracks what
-`start_as_current_span` makes current (not merely started spans). It is loaded
-through `sitecustomize` on `PYTHONPATH`, which needs no app changes and chains
-to any other `sitecustomize`. It loads the library with `ctypes.PyDLL` from the
-same path as `CUDA_INJECTION64_PATH`; `dlopen` returns the copy CUDA loads, so
-both share one thread-local.
+`start_as_current_span` makes current (not merely started spans). It loads
+without app changes in one of two ways. With `opentelemetry-instrument`, the
+installed package registers an `opentelemetry_pre_instrument` entry point.
+Without it, `sitecustomize` goes on `PYTHONPATH`; it chains to the next
+`sitecustomize`, but `opentelemetry-instrument`'s own does not chain, which is
+why the entry point exists. The bridge loads the library with `ctypes.PyDLL`
+from `CUDA_INJECTION64_PATH`; `dlopen` returns the copy CUDA loaded, so both
+share one thread-local.
 
 **Alternatives:** CUPTI external correlation (push/pop per span, but it needs
 CUPTI loaded before the bridge runs, and still needs a span→trace map); NVTX
@@ -38,18 +41,23 @@ can be added later behind the same bridge API.
 
 ### 2. Join table
 
-`correlation_id → (span, tid)` lives in a direct-mapped table of 2^17 slots, with
-a per-slot seqlock. Writing at launch is a few relaxed stores, with no
-allocation or locks. If more than 131k launches happen between two activity
+`correlation_id → span` lives in a direct-mapped table of 2^17 slots, with a
+per-slot seqlock. Writing at launch is a few relaxed stores, with no allocation
+or locks. The table is allocated with `calloc`, so its 4 MiB is only touched as
+it's used. If more than 131k launches happen between two activity
 flushes (1 s by default), older entries are overwritten and those kernels
 become unlinked.
 
 ### 3. Transport: unix SOCK_SEQPACKET, non-blocking, drop on pressure
 
 There's a single socket on the node, shared via `hostPath` in Kubernetes. See
-`docs/protocol.md`. Writes happen from the flush thread or CUPTI's worker
-thread, never from app threads. On `EAGAIN` the batch is dropped and counted;
-the app is never slowed down. The library has no gRPC or protobuf (see ADR 0001).
+`docs/protocol.md`, including its trust model. Sends happen on our flush thread
+or CUPTI's worker thread. The one exception is the final flush in the `atexit`
+handler, which runs on the exiting app thread. On `EAGAIN` the batch is dropped
+and counted. With no agent connected, records aren't encoded at all. The library
+has no gRPC or protobuf (see ADR 0001). The process metadata message is built
+once at startup, so `getenv()` is never called later from our threads, where it
+would race with the app's `setenv()`.
 
 ### 4. Profile shape (OTLP profiles, Pyroscope)
 
@@ -64,7 +72,10 @@ traces-to-profiles.
 
 `service.name` follows the OTel SDK rules from the process's own
 `OTEL_SERVICE_NAME`/`OTEL_RESOURCE_ATTRIBUTES`, so profiles and traces land in
-the same service.
+the same service. To bound memory and request size, the agent keeps at most
+20,000 distinct (kernel, device, span) samples per process per interval. Beyond
+that, kernels are counted without their span. Each process is exported in its
+own request.
 
 ## Consequences
 
@@ -72,4 +83,7 @@ the same service.
   CPU stacks at launch is future work and has to stay cheap.
 - Pinned, tested combination: OTLP profiles proto v0.4.1 (wire-identical to
   v0.3.0), Collector v0.165 with `--feature-gates=service.profilesSupport`,
-  Pyroscope v2.4.4.
+  Pyroscope v2.4.4. Verified locally: vecadd profiles appear in Pyroscope as
+  `gpu:gpu_time:nanoseconds:gpu:nanoseconds`, under the right service.
+- Pyroscope 2.4.4 keeps `service_name` as a series label but did not keep the
+  other resource attributes (`host.name`, `process.pid`) in that test.

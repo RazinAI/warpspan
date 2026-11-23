@@ -1,146 +1,145 @@
 # Warpspan
 
-Continuous GPU profiling linked to OpenTelemetry traces. Warpspan records every
-CUDA kernel your app runs, tags it with the trace/span (request) that launched
-it, and exports it as OTLP profiles. In Grafana you can then go from a slow span
-in Tempo to the GPU kernels it ran, as a flame graph in Pyroscope.
+GPU kernel profiling linked to OpenTelemetry traces. Warpspan records the CUDA
+kernels a process runs, tags each one with the trace/span that was active on the
+launching thread, and exports them as OTLP profiles (for example to Pyroscope).
 
-It works like auto-instrumentation: **no app code changes**, just environment
-variables at process start.
+It works like auto-instrumentation: no app code changes, only environment
+variables set at process start.
 
 ```
- app process (any language, e.g. PyTorch)                   node
-┌──────────────────────────────────────────────┐
-│ OTel SDK ─span start/end─▶ span bridge (Py)  │
-│                               │ warpspan_set_span()
-│ CUDA ──CUPTI──▶ libwarpspan.so ◀┘            │  unix socket   ┌─────────────┐  OTLP/gRPC  ┌───────────┐
-│   launch: correlation_id → span (thread-local)├──────────────▶│ warpspan    ├────────────▶│ Collector │─▶ Pyroscope ─▶ Grafana
-│   activity: kernel name, GPU start/end        │               │ agent (Go)  │             └───────────┘
-└──────────────────────────────────────────────┘               └─────────────┘
+ app process (e.g. PyTorch)                                   same node
+┌───────────────────────────────────────────────┐
+│ OTel SDK ─attach/detach─▶ span bridge (Python)│
+│                              │ warpspan_set_span()
+│ CUDA ──CUPTI──▶ libwarpspan.so ◀┘              │ unix socket  ┌────────────┐ OTLP/gRPC ┌───────────┐
+│   launch:   correlation_id → current span      ├─────────────▶│ agent (Go) ├──────────▶│ Collector │─▶ Pyroscope
+│   activity: kernel name, GPU start/end         │              └────────────┘           └───────────┘
+└───────────────────────────────────────────────┘
 ```
 
-- **`capture/`**: `libwarpspan.so`, loaded by CUDA through `CUDA_INJECTION64_PATH`.
-  It uses CUPTI's Callback API at launch and the Activity API for kernel timings,
-  and joins them on correlation ID.
-- **`bridge/python/`**: publishes the active OTel span to the library. It loads
-  itself through `PYTHONPATH`.
-- **`agent/`, `cmd/warpspan/`**: node agent. It aggregates per process, span
-  and kernel, and exports OTLP profiles over gRPC.
-- **`deploy/`**: docker-compose backend (Collector, Pyroscope, Tempo, Grafana)
-  and Kubernetes manifests.
-- Design: [`docs/decisions/`](docs/decisions/), wire format:
-  [`docs/protocol.md`](docs/protocol.md).
+| Path | What |
+|---|---|
+| `capture/` | `libwarpspan.so`, loaded by CUDA via `CUDA_INJECTION64_PATH` (CUPTI Callback + Activity API) |
+| `bridge/python/` | publishes the active OTel span to the library |
+| `agent/`, `cmd/warpspan/` | node agent: aggregates per process/span/kernel, exports OTLP profiles |
+| `tools/profiles-dump/` | tiny OTLP profiles receiver that prints what it gets |
+| `deploy/` | docker-compose backend (Collector, Pyroscope, Tempo, Grafana), Kubernetes manifests |
+| `docs/` | [ADRs](docs/decisions/), [wire protocol](docs/protocol.md) |
 
-Status: early prototype (v0.1.0). Linux x86_64, NVIDIA GPUs. It is written to
-build against CUDA 11.6 and newer, but it has only been tested with CUDA 13.4 on
-an RTX 3070.
+**Status:** prototype. Linux x86_64, NVIDIA GPUs. Tested on one machine (RTX
+3070, CUDA 13.4, driver 615). The build has guards for CUDA 11.6+, but older
+versions have not been tried.
+
+What has been verified: CUDA kernels get captured and sent through the agent and
+Collector into Pyroscope (profile type `gpu`, correct `service.name`). The Python
+bridge tracks the active span (unit tests, `opentelemetry-instrument`).
+Not yet verified end to end: span links on a real PyTorch workload, and Grafana's
+traces-to-profiles view.
 
 ## Build
 
-Requirements: CUDA toolkit (for `cupti.h` / `libcupti.so`), `g++`, `make`,
-Go ≥ 1.26 (older Go downloads it automatically).
+Requirements: CUDA toolkit (`cupti.h`, `libcupti.so`), `g++`, `make`, Go ≥ 1.26
+(an older `go` downloads 1.26 automatically).
 
 ```sh
-make                      # capture/libwarpspan.so, bin/warpspan, bin/profiles-dump
-make -C capture CUDA_HOME=/usr/local/cuda-12.4   # pick a specific toolkit
+make                                           # capture/libwarpspan.so, bin/warpspan, bin/profiles-dump
+make -C capture CUDA_HOME=/usr/local/cuda-12.4  # a specific toolkit
 ```
 
-Build `libwarpspan.so` **with the same CUDA major version the GPU driver
-supports** (`nvidia-smi`, top right "CUDA Version"). CUPTI from a newer toolkit
-than the driver fails to initialise. Warpspan then logs `CUPTI setup failed` and
-the app keeps running unprofiled.
+Build `libwarpspan.so` against a CUDA toolkit **no newer than what the driver
+supports** (`nvidia-smi`, top right, "CUDA Version"). Otherwise CUPTI fails to
+start: warpspan logs `CUPTI setup failed` and the app runs unprofiled.
 
-## Try it on one GPU machine (no Kubernetes)
+## Try it on a GPU machine
 
 ```sh
-# 1. Build
 make
 
-# 2. Start a receiver. Either the debug printer:
+# 1. A receiver. Either print what arrives:
 ./bin/profiles-dump -listen 127.0.0.1:4317 &
-#    or the full backend (needs Docker); Grafana is then on http://localhost:3000:
+#    or run the full backend (Docker; Grafana on localhost:3000, GRAFANA_PORT=3001 to change):
 #    docker compose -f deploy/docker-compose.yaml up -d
 
-# 3. Start the agent
-./bin/warpspan --socket /tmp/warpspan/warpspan.sock --otlp-endpoint 127.0.0.1:4317 &
+# 2. The agent
+./bin/warpspan --socket /tmp/warpspan/warpspan.sock --otlp-endpoint http://127.0.0.1:4317 &
 
-# 4. Run any CUDA app with warpspan injected
+# 3. Any CUDA program, with warpspan injected
 export CUDA_INJECTION64_PATH=$PWD/capture/libwarpspan.so
 export WARPSPAN_SOCKET=/tmp/warpspan/warpspan.sock
-export PYTHONPATH=$PWD/bridge/python/autoload:$PWD/bridge/python/src   # Python span bridge
 export OTEL_SERVICE_NAME=torch-spans-example
-python examples/torch-spans/app.py --requests 50    # needs torch + opentelemetry-sdk
+export PYTHONPATH=$PWD/bridge/python/autoload:$PWD/bridge/python/src   # Python span bridge
+python examples/torch-spans/app.py --requests 50                       # needs torch + opentelemetry-sdk
 ```
 
-What you should see:
+If the app runs under `opentelemetry-instrument`, install the bridge instead of
+setting `PYTHONPATH` (`pip install ./bridge/python`). `opentelemetry-instrument`
+puts its own `sitecustomize` first, and that one doesn't chain to ours, so the
+bridge loads through its `opentelemetry_pre_instrument` entry point instead.
 
-- The app prints `warpspan: loaded …`, `warpspan: connected to agent …`, and on
-  exit `warpspan: exiting: N kernels captured, M linked to spans, 0 dropped`.
-- The agent logs an `interval` line every 10 s with `kernels=` and
-  `linked_to_spans=`, plus the top kernels.
-- `profiles-dump` prints samples such as
-  `[812345]  cuda:0 > at::native::… [trace=… span=…]`. The `trace=`/`span=`
-  values match the IDs the example app prints.
-- In Grafana: Explore → Pyroscope → profile type `gpu` / `gpu_time`, service
-  `torch-spans-example`. The Tempo data source has "traces to profiles" set up.
-  For that, also export the app's traces
-  (`pip install opentelemetry-exporter-otlp-proto-grpc` and
-  `OTEL_EXPORTER_OTLP_ENDPOINT=http://localhost:4317`).
+What to look for:
 
-Debugging without the agent: `WARPSPAN_DEBUG_FILE=/tmp/kernels.log` (or `-` for
-stderr) writes one line per kernel, including trace/span IDs.
+- On stderr the app prints `warpspan: loaded …`, `warpspan: connected to agent …`,
+  and at exit `warpspan: exiting: N kernels, M linked to spans, …`. If M is 0
+  while the app creates spans, the bridge isn't loaded.
+- The agent logs one `interval` line per export with `kernels=` and `linked_to_spans=`.
+- `profiles-dump` prints samples such as `[812345]  cuda:0 > at::native::… [trace=… span=…]`.
+  The trace/span IDs match the ones the example app prints.
+- In Pyroscope or Grafana: profile type `gpu` → `gpu_time`, service
+  `torch-spans-example`. A freshly started Pyroscope can take about a minute
+  before data becomes queryable.
+
+Without any agent, `WARPSPAN_DEBUG_FILE=/tmp/kernels.log` (`-` for stderr)
+writes one line per kernel, including trace/span IDs.
 
 ## Kubernetes
 
-See [`deploy/kubernetes/`](deploy/kubernetes/):
+[`deploy/kubernetes/`](deploy/kubernetes/) has the manual setup (the webhook and
+Helm chart that automate it don't exist yet):
 
-1. Build and push the two images:
+1. Build and push the images:
    - `docker build -f agent/Dockerfile -t <registry>/warpspan-agent:0.1.0 .`
    - `docker build -f capture/Dockerfile --build-arg CUDA_IMAGE=nvidia/cuda:<your CUDA>-devel-ubuntu20.04 -t <registry>/warpspan-inject:0.1.0 .`
-2. `kubectl apply -f deploy/kubernetes/agent-daemonset.yaml` (edit the image
-   and `--otlp-endpoint` first).
-3. Add the init container, env vars and volumes from
-   `deploy/kubernetes/example-gpu-pod.yaml` to your GPU workload.
-
-A mutating webhook and Helm chart that do step 3 automatically are planned.
+2. Edit the image and `--otlp-endpoint` in `agent-daemonset.yaml`, then `kubectl apply` it.
+3. Add the init container, env vars and volumes from `example-gpu-pod.yaml` to the GPU workload.
+   `hostPath` volumes are rejected by the `baseline`/`restricted` Pod Security levels.
 
 ## Configuration
 
-Capture library (env vars of the app process):
+Capture library (environment of the app process, read once at CUDA initialisation):
 
 | Variable | Default | |
 |---|---|---|
 | `CUDA_INJECTION64_PATH` | (none) | path to `libwarpspan.so`; enables warpspan |
 | `WARPSPAN_SOCKET` | `/var/run/warpspan/warpspan.sock` | agent socket; empty = don't send |
-| `WARPSPAN_FLUSH_INTERVAL_MS` | `1000` | how often CUPTI buffers are flushed |
 | `WARPSPAN_DEBUG_FILE` | (none) | write kernel records as text (`-` = stderr) |
 | `WARPSPAN_QUIET` | | `1` = no log lines on stderr |
 | `WARPSPAN_DISABLE` | | `1` = load but do nothing |
-| `OTEL_SERVICE_NAME`, `OTEL_RESOURCE_ATTRIBUTES` | | read for `service.name` and resource attributes |
+| `OTEL_SERVICE_NAME`, `OTEL_RESOURCE_ATTRIBUTES` | | used for `service.name` and resource attributes |
 
-Agent: `./bin/warpspan -h`. The main flags are `--socket`, `--otlp-endpoint`
-(`host:port`, `http://`, `https://`, or `none`), `--otlp-header k=v`,
-`--interval`, `--node-name`. It also reads `OTEL_EXPORTER_OTLP_ENDPOINT` and
-`OTEL_EXPORTER_OTLP_HEADERS`.
+Agent: `./bin/warpspan -h`. The flags are `--socket`, `--otlp-endpoint`
+(`http://host:port` is plaintext, `https://host:port` or `host:port` uses TLS,
+`none` disables export), `--otlp-header k=v`, `--interval`, `--node-name`.
+It also reads `OTEL_EXPORTER_OTLP_ENDPOINT` and `OTEL_EXPORTER_OTLP_HEADERS`.
 
-The Collector needs `--feature-gates=service.profilesSupport`, because OTLP
-profiles are still alpha. Tested versions: Collector 0.165.0, Pyroscope 2.4.4.
+OTLP profiles are alpha: the Collector needs `--feature-gates=service.profilesSupport`.
+Tested with Collector 0.165.0 and Pyroscope 2.4.4.
 
-## Limitations (v0.1)
+## Limitations
 
-- Only kernels. Memcpy/memset aren't captured yet, and there are no CPU or
-  Python stacks.
-- Span linking needs a span bridge (Python only so far) and works per thread.
-  asyncio and kernels launched from other threads (e.g. autograd backward) end
-  up unlinked or misattributed. See ADR 0002.
-- CUPTI allows one subscriber per process. While warpspan is active, Nsight
-  Systems or `torch.profiler` may fail to attach (and the other way round). Set
-  `WARPSPAN_DISABLE=1` for runs where you use those tools.
-- Processes that `fork()` after CUDA initialisation stop being profiled in the
-  child.
+- Only kernels: no memcpy/memset, no CPU or Python stacks.
+- Span linking works per thread and needs a span bridge (Python only so far).
+  asyncio, and kernels launched from other threads (e.g. autograd backward), end
+  up unlinked or attributed to the last span on that thread. See ADR 0002.
+- Records are dropped rather than slowing the app: on CUPTI buffer overflow,
+  when the agent is busy, and when more than 131k launches happen between flushes.
+- CUPTI allows one subscriber per process. Nsight Systems or `torch.profiler`
+  may fail to attach while warpspan is active; use `WARPSPAN_DISABLE=1` for those runs.
+- A process that `fork()`s after CUDA initialisation isn't profiled in the child.
+- The agent socket is world-writable; see the trust model in `docs/protocol.md`.
 
 ## Tests
 
 ```sh
-make test     # Go unit tests + Python bridge tests (pip install opentelemetry-sdk pytest)
+make test   # Go tests + Python bridge tests (pip install opentelemetry-sdk pytest)
 ```

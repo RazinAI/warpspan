@@ -57,6 +57,7 @@ spec:
           readOnly: true
         - name: warpspan-run
           mountPath: /var/run/warpspan
+          readOnly: true # connecting to the socket works; replacing it does not
       resources:
         limits:
           nvidia.com/gpu: 1
