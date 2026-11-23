@@ -1,0 +1,11 @@
+# Keep local build outputs out of image builds (a stale libwarpspan.so would be
+# copied in and make would skip rebuilding it against the image's CUDA).
+.git
+bin
+**/*.so
+**/*.o
+**/compile_flags.txt
+**/__pycache__
+**/*.egg-info
+deploy/run
+examples/vecadd/add_cuda

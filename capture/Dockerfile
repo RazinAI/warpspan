@@ -15,13 +15,14 @@ RUN apt-get update && apt-get install -y --no-install-recommends make g++ && rm 
 WORKDIR /src/capture
 COPY capture/ .
 RUN make CUDA_HOME=/usr/local/cuda STATIC_CXX=${STATIC_CXX}
-# Ship the exact libcupti soname the .so needs next to it (found via RUNPATH $ORIGIN),
-# because most app images contain the CUDA runtime but not CUPTI.
+# Ship the libcupti the .so resolves to (via its RUNPATH) next to it, because
+# most app images contain the CUDA runtime but not CUPTI. $ORIGIN comes first in
+# RUNPATH, so the copy is used at runtime.
 RUN mkdir -p /out/python \
  && cp libwarpspan.so /out/ \
- && soname="$(readelf -d libwarpspan.so | sed -n 's/.*NEEDED.*\[\(libcupti[^]]*\)\].*/\1/p')" \
- && cupti="$(find -L /usr/local/cuda/ -name "$soname" | head -1)" \
- && test -n "$cupti" && cp -L "$cupti" /out/"$soname"
+ && cupti="$(ldd libwarpspan.so | awk '/libcupti/ {print $1, $3}')" \
+ && echo "bundling: $cupti" \
+ && set -- $cupti && test -f "$2" && cp -L "$2" "/out/$1"
 COPY bridge/python/src/warpspan /out/python/warpspan
 COPY bridge/python/autoload/sitecustomize.py /out/python/sitecustomize.py
 
