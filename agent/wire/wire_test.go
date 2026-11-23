@@ -1,13 +1,13 @@
 package wire
 
 import (
-	"errors"
+	"encoding/binary"
 	"reflect"
 	"testing"
 )
 
 func TestRoundTrip(t *testing.T) {
-	hello := &Hello{PID: 42, Attrs: []KV{{"process.pid", "42"}, {"env.OTEL_SERVICE_NAME", "svc"}}}
+	hello := &Hello{PID: 42, Attrs: []KV{{Key: "host.name", Value: "gpu-1"}, {Key: "env.OTEL_SERVICE_NAME", Value: "svc"}}}
 	got, err := Decode(EncodeHello(hello))
 	if err != nil {
 		t.Fatal(err)
@@ -17,10 +17,10 @@ func TestRoundTrip(t *testing.T) {
 	}
 
 	kernels := &Kernels{
+		PID:          42,
 		DroppedTotal: 7,
 		Records: []Kernel{
-			{Name: "_Z3addiPfS_", StartNs: 100, EndNs: 250, TraceID: [16]byte{1}, SpanID: [8]byte{2},
-				CorrelationID: 5, Device: 1, Stream: 7, ThreadID: 99, Linked: true},
+			{Name: "_Z3addiPfS_", StartNs: 100, EndNs: 250, TraceID: [16]byte{1}, SpanID: [8]byte{2}, Device: 1},
 			{Name: "other", StartNs: 300, EndNs: 400},
 			{Name: "_Z3addiPfS_", StartNs: 500, EndNs: 600},
 		},
@@ -32,29 +32,28 @@ func TestRoundTrip(t *testing.T) {
 	if !reflect.DeepEqual(got, kernels) {
 		t.Fatalf("kernels: got %+v want %+v", got, kernels)
 	}
+	if !kernels.Records[0].Linked() || kernels.Records[1].Linked() {
+		t.Fatal("Linked() wrong")
+	}
 }
 
+// The record size must match capture/protocol.h.
 func TestRecordSize(t *testing.T) {
 	one := EncodeKernels(&Kernels{Records: []Kernel{{Name: ""}}})
-	// header + fixed + one empty string (2 bytes) + one record
 	if want := HeaderSize + KernelsFixedSize + 2 + KernelRecordSize; len(one) != want {
-		t.Fatalf("encoded size %d, want %d (record layout drifted from capture/protocol.h?)", len(one), want)
+		t.Fatalf("encoded size %d, want %d", len(one), want)
 	}
 }
 
 func TestDecodeErrors(t *testing.T) {
 	valid := EncodeKernels(&Kernels{Records: []Kernel{{Name: "k"}}})
-
-	badMagic := append([]byte(nil), valid...)
-	badMagic[0] ^= 0xFF
-
-	badVersion := append([]byte(nil), valid...)
-	badVersion[4] = 99
-
-	badNameIndex := append([]byte(nil), valid...)
-	// name_index lives 4 bytes after correlation_id: header+fixed+string(2+1)+40
-	off := HeaderSize + KernelsFixedSize + 3 + 44
-	badNameIndex[off] = 9
+	corrupt := func(off int, b byte) []byte {
+		m := append([]byte(nil), valid...)
+		m[off] = b
+		return m
+	}
+	hugeCount := append([]byte(nil), valid...)
+	binary.LittleEndian.PutUint32(hugeCount[HeaderSize+8:], 0xFFFFFFFF) // string_count
 
 	tests := []struct {
 		name string
@@ -62,10 +61,12 @@ func TestDecodeErrors(t *testing.T) {
 	}{
 		{"empty", nil},
 		{"short header", valid[:10]},
-		{"bad magic", badMagic},
-		{"bad version", badVersion},
+		{"bad magic", corrupt(0, 0)},
+		{"bad version", corrupt(4, 99)},
 		{"truncated payload", valid[:len(valid)-1]},
-		{"name index out of range", badNameIndex},
+		{"name index out of range", corrupt(HeaderSize+KernelsFixedSize+3+40, 9)},
+		{"huge string count", hugeCount},
+		{"too large", make([]byte, MaxMessage+1)},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
@@ -74,8 +75,12 @@ func TestDecodeErrors(t *testing.T) {
 			}
 		})
 	}
+}
 
-	if _, err := Decode(valid[:HeaderSize-1]); !errors.Is(err, ErrShort) {
-		t.Fatalf("want ErrShort, got %v", err)
-	}
+func FuzzDecode(f *testing.F) {
+	f.Add(EncodeHello(&Hello{PID: 1, Attrs: []KV{{Key: "a", Value: "b"}}}))
+	f.Add(EncodeKernels(&Kernels{Records: []Kernel{{Name: "k", SpanID: [8]byte{1}}}}))
+	f.Fuzz(func(t *testing.T, msg []byte) {
+		_, _ = Decode(msg) // must not panic or allocate unboundedly
+	})
 }

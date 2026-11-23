@@ -15,9 +15,8 @@ const (
 	Version          uint16 = 1
 	HeaderSize              = 16
 	KernelsFixedSize        = 16
-	KernelRecordSize        = 64
+	KernelRecordSize        = 48
 	MaxMessage              = 60 * 1024
-	FlagLinked       uint32 = 1 << 0
 )
 
 // Message types.
@@ -39,22 +38,22 @@ type Hello struct {
 
 // Kernel is one kernel execution, joined with the span that launched it.
 type Kernel struct {
-	Name          string
-	StartNs       uint64
-	EndNs         uint64
-	TraceID       [16]byte
-	SpanID        [8]byte
-	CorrelationID uint32
-	Device        uint32
-	Stream        uint32
-	ThreadID      uint32
-	Linked        bool // TraceID/SpanID are valid
+	Name    string
+	StartNs uint64
+	EndNs   uint64
+	TraceID [16]byte
+	SpanID  [8]byte // all zero: not linked to a span
+	Device  uint32
 }
+
+// Linked reports whether the kernel was launched inside a span.
+func (k *Kernel) Linked() bool { return k.SpanID != [8]byte{} }
 
 // Kernels is a batch of kernel executions.
 type Kernels struct {
-	// DroppedTotal is the running total of records the capture library could not
-	// deliver (CUPTI buffer overflow or agent busy/unreachable).
+	PID uint32
+	// DroppedTotal is the process's running total of records lost to CUPTI
+	// buffer overflow or to the agent being busy.
 	DroppedTotal uint64
 	Records      []Kernel
 }
@@ -66,6 +65,9 @@ var ErrShort = errors.New("wire: message too short")
 
 // Decode parses one message. It returns *Hello or *Kernels.
 func Decode(msg []byte) (any, error) {
+	if len(msg) > MaxMessage {
+		return nil, fmt.Errorf("wire: message of %d bytes exceeds %d", len(msg), MaxMessage)
+	}
 	if len(msg) < HeaderSize {
 		return nil, ErrShort
 	}
@@ -77,6 +79,7 @@ func Decode(msg []byte) (any, error) {
 	}
 	typ := le.Uint16(msg[6:])
 	n := int(le.Uint32(msg[8:]))
+	pid := le.Uint32(msg[12:])
 	payload := msg[HeaderSize:]
 	if len(payload) != n {
 		return nil, fmt.Errorf("wire: payload length %d, header says %d", len(payload), n)
@@ -84,57 +87,54 @@ func Decode(msg []byte) (any, error) {
 	r := reader{b: payload}
 	switch typ {
 	case TypeHello:
-		return decodeHello(&r)
+		return decodeHello(&r, pid)
 	case TypeKernels:
-		return decodeKernels(&r)
+		return decodeKernels(&r, pid)
 	default:
 		return nil, fmt.Errorf("wire: unknown message type %d", typ)
 	}
 }
 
-func decodeHello(r *reader) (*Hello, error) {
-	h := &Hello{PID: r.u32()}
+func decodeHello(r *reader, pid uint32) (*Hello, error) {
+	h := &Hello{PID: pid}
 	count := r.u32()
-	if r.err != nil {
-		return nil, r.err
-	}
 	for i := uint32(0); i < count && r.err == nil; i++ {
 		k, v := r.str16(), r.str16()
-		h.Attrs = append(h.Attrs, KV{Key: k, Value: v})
+		if r.err == nil {
+			h.Attrs = append(h.Attrs, KV{Key: k, Value: v})
+		}
 	}
 	return h, r.err
 }
 
-func decodeKernels(r *reader) (*Kernels, error) {
-	k := &Kernels{DroppedTotal: r.u64()}
-	nstrings, nrecords := r.u32(), r.u32()
+func decodeKernels(r *reader, pid uint32) (*Kernels, error) {
+	k := &Kernels{PID: pid, DroppedTotal: r.u64()}
+	nstrings, nrecords := int(r.u32()), int(r.u32())
 	if r.err != nil {
 		return nil, r.err
 	}
-	if int(nrecords)*KernelRecordSize > len(r.b) {
+	// Counts come from the peer: bound them by the bytes actually present
+	// before allocating (each string takes >= 2 bytes, each record 48).
+	if nstrings*2+nrecords*KernelRecordSize > len(r.b) {
 		return nil, ErrShort
 	}
 	names := make([]string, 0, nstrings)
-	for i := uint32(0); i < nstrings && r.err == nil; i++ {
+	for i := 0; i < nstrings && r.err == nil; i++ {
 		names = append(names, r.str16())
 	}
 	k.Records = make([]Kernel, 0, nrecords)
-	for i := uint32(0); i < nrecords && r.err == nil; i++ {
+	for i := 0; i < nrecords && r.err == nil; i++ {
 		var rec Kernel
 		rec.StartNs = r.u64()
 		rec.EndNs = r.u64()
 		r.bytes(rec.TraceID[:])
 		r.bytes(rec.SpanID[:])
-		rec.CorrelationID = r.u32()
-		nameIdx := r.u32()
+		nameIdx := int(r.u32())
 		rec.Device = r.u32()
-		rec.Stream = r.u32()
-		rec.ThreadID = r.u32()
-		rec.Linked = r.u32()&FlagLinked != 0
 		if r.err != nil {
 			break
 		}
-		if int(nameIdx) >= len(names) {
+		if nameIdx >= len(names) {
 			return nil, fmt.Errorf("wire: name index %d out of range (%d names)", nameIdx, len(names))
 		}
 		rec.Name = names[nameIdx]

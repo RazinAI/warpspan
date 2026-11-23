@@ -23,7 +23,7 @@ func testSnapshot() *collect.Snapshot {
 	trace, _ := hex.DecodeString("0af7651916cd43dd8448eb211c80319c")
 	span, _ := hex.DecodeString("b7ad6b7169203331")
 	var k collect.Key
-	k.Name, k.Linked = torchKernel, true
+	k.Name = torchKernel
 	copy(k.TraceID[:], trace)
 	copy(k.SpanID[:], span)
 	start := time.Unix(1700000000, 0)
@@ -31,7 +31,7 @@ func testSnapshot() *collect.Snapshot {
 		Start: start,
 		End:   start.Add(10 * time.Second),
 		Processes: []collect.ProcessSnapshot{{
-			Process: &collect.Process{ID: 1, PID: 7, Resource: []collect.Attr{{Key: "service.name", Value: "infer"}, {Key: "process.pid", Value: "7"}}},
+			Process: &collect.Process{PID: 7, Resource: []collect.Attr{{Key: "service.name", Value: "infer"}, {Key: "process.pid", Value: "7"}}},
 			Samples: map[collect.Key]collect.Stat{
 				k:                     {Count: 3, TotalNs: 3000},
 				{Name: "_Z3addiPfS_"}: {Count: 1, TotalNs: 500},
@@ -43,7 +43,7 @@ func testSnapshot() *collect.Snapshot {
 // TestBuildPyroscopeInvariants checks the properties Pyroscope's OTLP converter
 // (pkg/ingester/otlp/convert.go, v2.4.x) relies on.
 func TestBuildPyroscopeInvariants(t *testing.T) {
-	req := Build(testSnapshot(), Options{Demangle: true, ScopeVersion: "test"})
+	req := Build(testSnapshot(), Options{ScopeVersion: "test"})
 	if req == nil {
 		t.Fatal("nil request")
 	}
@@ -118,7 +118,7 @@ func TestBuildPyroscopeInvariants(t *testing.T) {
 	if !sawLink {
 		t.Fatal("linked kernel has no link")
 	}
-	t.Logf("demangled frame: %s", kernelFrame(torchKernel, true))
+	t.Logf("demangled frame: %s", kernelFrame(torchKernel))
 }
 
 func TestBuildEmpty(t *testing.T) {
@@ -151,7 +151,7 @@ func TestExportOverGRPC(t *testing.T) {
 	go func() { _ = srv.Serve(lis) }()
 	defer srv.Stop()
 
-	exp, err := NewExporter(ExporterConfig{Endpoint: "http://" + lis.Addr().String(), Headers: map[string]string{"x-scope-orgid": "tenant1"}, Gzip: true})
+	exp, err := NewExporter("http://"+lis.Addr().String(), map[string]string{"x-scope-orgid": "tenant1"})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -172,23 +172,21 @@ func TestExportOverGRPC(t *testing.T) {
 
 func TestParseEndpoint(t *testing.T) {
 	tests := []struct {
-		in       string
-		insecure bool
-		target   string
-		tls      bool
-		err      bool
+		in     string
+		target string
+		tls    bool
+		err    bool
 	}{
-		{"localhost:4317", true, "localhost:4317", false, false},
-		{"localhost:4317", false, "localhost:4317", true, false},
-		{"http://collector:4317", false, "collector:4317", false, false},
-		{"https://otlp.example.com:443/", true, "otlp.example.com:443", true, false},
-		{"http://collector:4318/v1/profiles", true, "", false, true},
-		{"", true, "", false, true},
+		{"http://collector:4317", "collector:4317", false, false},
+		{"https://otlp.example.com:443/", "otlp.example.com:443", true, false},
+		{"collector:4317", "collector:4317", true, false},
+		{"http://collector:4318/v1/profiles", "", false, true},
+		{"", "", false, true},
 	}
 	for _, tt := range tests {
-		target, useTLS, err := parseEndpoint(tt.in, tt.insecure)
+		target, useTLS, err := parseEndpoint(tt.in)
 		if (err != nil) != tt.err || target != tt.target || useTLS != tt.tls {
-			t.Errorf("parseEndpoint(%q, %v) = %q, %v, %v", tt.in, tt.insecure, target, useTLS, err)
+			t.Errorf("parseEndpoint(%q) = %q, %v, %v", tt.in, target, useTLS, err)
 		}
 	}
 }

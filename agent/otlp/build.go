@@ -21,7 +21,6 @@ import (
 	"crypto/rand"
 	"fmt"
 	"sort"
-	"sync"
 
 	"github.com/ianlancetaylor/demangle"
 	collectorpb "go.opentelemetry.io/proto/otlp/collector/profiles/v1development"
@@ -45,33 +44,11 @@ const (
 // Options control how profiles are built.
 type Options struct {
 	ScopeVersion string
-	// Demangle C++ kernel names (parameters are dropped to keep frames readable).
-	Demangle bool
 }
 
-var (
-	demangleMu    sync.Mutex
-	demangleCache = map[string]string{}
-)
-
-// KernelName returns the demangled kernel name (without parameters).
-func KernelName(name string) string { return kernelFrame(name, true) }
-
-func kernelFrame(name string, enabled bool) string {
-	if !enabled {
-		return name
-	}
-	demangleMu.Lock()
-	defer demangleMu.Unlock()
-	if v, ok := demangleCache[name]; ok {
-		return v
-	}
-	v := demangle.Filter(name, demangle.NoParams)
-	if len(demangleCache) < 100_000 {
-		demangleCache[name] = v
-	}
-	return v
-}
+// kernelFrame demangles a C++ kernel name, dropping parameters to keep frames
+// readable. Non-C++ names are returned unchanged.
+func kernelFrame(name string) string { return demangle.Filter(name, demangle.NoParams) }
 
 // Build converts a snapshot into one export request. It returns nil when there
 // is nothing to export.
@@ -95,9 +72,9 @@ func Build(s *collect.Snapshot, opts Options) *collectorpb.ExportProfilesService
 		countProfile := d.newProfile(CountSampleType, "count", start, duration)
 		for _, k := range keys {
 			st := ps.Samples[k]
-			stack := d.stack(kernelFrame(k.Name, opts.Demangle), fmt.Sprintf("cuda:%d", k.Device))
+			stack := d.stack(kernelFrame(k.Name), fmt.Sprintf("cuda:%d", k.Device))
 			var link int32
-			if k.Linked {
+			if k.Linked() {
 				link = d.link(k.TraceID, k.SpanID)
 			}
 			timeProfile.Samples = append(timeProfile.Samples,
@@ -133,9 +110,6 @@ func keyLess(a, b collect.Key) bool {
 	}
 	if a.Device != b.Device {
 		return a.Device < b.Device
-	}
-	if a.Linked != b.Linked {
-		return !a.Linked
 	}
 	if a.TraceID != b.TraceID {
 		return string(a.TraceID[:]) < string(b.TraceID[:])

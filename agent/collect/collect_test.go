@@ -33,15 +33,15 @@ func TestResourceServiceName(t *testing.T) {
 }
 
 func TestResourceMerge(t *testing.T) {
-	h := &wire.Hello{Attrs: []wire.KV{
-		{Key: "process.pid", Value: "7"},
-		{Key: "process.executable.path", Value: "/usr/bin/python3"}, // not exported (too long/high-cardinality for labels)
+	h := &wire.Hello{PID: 7, Attrs: []wire.KV{
+		{Key: "host.name", Value: "gpu-1"},
 		{Key: "env.OTEL_RESOURCE_ATTRIBUTES", Value: "k8s.pod.name=p1, deployment.environment=prod,bad"},
 	}}
-	got := Resource(h, []Attr{{"k8s.node.name", "n1"}})
+	got := Resource(h, []Attr{{Key: "k8s.node.name", Value: "n1"}})
 	want := []Attr{
 		{Key: "service.name", Value: "unknown_service"},
 		{Key: "deployment.environment", Value: "prod"},
+		{Key: "host.name", Value: "gpu-1"},
 		{Key: "k8s.node.name", Value: "n1"},
 		{Key: "k8s.pod.name", Value: "p1"},
 		{Key: "process.pid", Value: "7"},
@@ -57,37 +57,51 @@ func TestCollectorAggregatesAndResets(t *testing.T) {
 	span := [8]byte{9}
 	trace := [16]byte{8}
 	c.Add(1, &wire.Kernels{DroppedTotal: 3, Records: []wire.Kernel{
-		{Name: "k", StartNs: 0, EndNs: 100, TraceID: trace, SpanID: span, Linked: true},
-		{Name: "k", StartNs: 0, EndNs: 50, TraceID: trace, SpanID: span, Linked: true},
+		{Name: "k", StartNs: 0, EndNs: 100, TraceID: trace, SpanID: span},
+		{Name: "k", StartNs: 0, EndNs: 50, TraceID: trace, SpanID: span},
 		{Name: "k", StartNs: 0, EndNs: 10}, // unlinked: separate sample
 	}})
-	c.Add(2, &wire.Kernels{Records: []wire.Kernel{{Name: "unknown process"}}}) // ignored
+	c.Add(1, &wire.Kernels{DroppedTotal: 5})
+	c.Add(2, &wire.Kernels{Records: []wire.Kernel{{Name: "unknown connection"}}}) // ignored
 
 	s := c.Snapshot(time.Now())
 	if len(s.Processes) != 1 {
 		t.Fatalf("want 1 process, got %d", len(s.Processes))
 	}
 	p := s.Processes[0]
-	linked := p.Samples[Key{Name: "k", TraceID: trace, SpanID: span, Linked: true}]
-	unlinked := p.Samples[Key{Name: "k"}]
-	if linked != (Stat{Count: 2, TotalNs: 150}) || unlinked != (Stat{Count: 1, TotalNs: 10}) {
-		t.Fatalf("unexpected samples: %+v", p.Samples)
+	if got := p.Samples[Key{Name: "k", TraceID: trace, SpanID: span}]; got != (Stat{Count: 2, TotalNs: 150}) {
+		t.Fatalf("linked sample %+v", got)
 	}
-	if p.Dropped != 3 {
-		t.Fatalf("dropped %d, want 3", p.Dropped)
+	if got := p.Samples[Key{Name: "k"}]; got != (Stat{Count: 1, TotalNs: 10}) {
+		t.Fatalf("unlinked sample %+v", got)
 	}
-	if k, l, d := s.Totals(); k != 3 || l != 2 || d != 3 {
-		t.Fatalf("totals %d %d %d", k, l, d)
+	// The first DroppedTotal (3) is a baseline from before we connected.
+	if p.Dropped != 2 {
+		t.Fatalf("dropped %d, want 2", p.Dropped)
 	}
 
-	// Next interval: only the new drops count; closed processes disappear after one snapshot.
-	c.Add(1, &wire.Kernels{DroppedTotal: 5})
+	// Closed processes are reported once more, then removed.
+	c.Add(1, &wire.Kernels{DroppedTotal: 6})
 	c.Close(1)
 	s = c.Snapshot(time.Now())
-	if len(s.Processes) != 1 || s.Processes[0].Dropped != 2 || len(s.Processes[0].Samples) != 0 {
+	if len(s.Processes) != 1 || s.Processes[0].Dropped != 1 || len(s.Processes[0].Samples) != 0 {
 		t.Fatalf("second snapshot: %+v", s.Processes)
 	}
 	if s = c.Snapshot(time.Now()); len(s.Processes) != 0 {
 		t.Fatalf("closed process still reported: %+v", s.Processes)
+	}
+}
+
+func TestCollectorCapsKeys(t *testing.T) {
+	c := New(nil)
+	c.Hello(1, &wire.Hello{PID: 1})
+	recs := make([]wire.Kernel, MaxKeysPerProcess+10)
+	for i := range recs {
+		recs[i] = wire.Kernel{Name: "k", EndNs: 1, SpanID: [8]byte{byte(i), byte(i >> 8), byte(i >> 16), 1}}
+	}
+	c.Add(1, &wire.Kernels{Records: recs})
+	p := c.Snapshot(time.Now()).Processes[0]
+	if len(p.Samples) != MaxKeysPerProcess+1 || p.Unlinked != 10 || p.Samples[Key{Name: "k"}].Count != 10 {
+		t.Fatalf("samples=%d unlinked=%d", len(p.Samples), p.Unlinked)
 	}
 }

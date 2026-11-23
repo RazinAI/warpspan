@@ -12,7 +12,6 @@ import (
 	"os"
 	"path/filepath"
 	"sync"
-	"sync/atomic"
 	"syscall"
 
 	"github.com/zraisan/warpspan/agent/collect"
@@ -20,7 +19,8 @@ import (
 )
 
 // Listen creates the socket at path, replacing a stale socket file. The socket
-// is made world-writable because injected apps usually run as other users.
+// is world-writable because injected apps run as arbitrary users; see the
+// trust model in docs/protocol.md.
 func Listen(path string) (*net.UnixListener, error) {
 	if err := os.MkdirAll(filepath.Dir(path), 0o755); err != nil {
 		return nil, fmt.Errorf("create socket dir: %w", err)
@@ -49,16 +49,14 @@ type Server struct {
 	Collector *collect.Collector
 	Log       *slog.Logger
 
-	nextID atomic.Uint64
+	nextID uint64 // only used by the accept loop
 	wg     sync.WaitGroup
 }
 
 // Serve accepts connections until ctx is cancelled or the listener fails.
 func (s *Server) Serve(ctx context.Context, l *net.UnixListener) error {
-	go func() {
-		<-ctx.Done()
-		l.Close()
-	}()
+	stop := context.AfterFunc(ctx, func() { l.Close() })
+	defer stop()
 	for {
 		conn, err := l.AcceptUnix()
 		if err != nil {
@@ -68,7 +66,8 @@ func (s *Server) Serve(ctx context.Context, l *net.UnixListener) error {
 			}
 			return err
 		}
-		id := s.nextID.Add(1)
+		s.nextID++
+		id := s.nextID
 		s.wg.Add(1)
 		go func() {
 			defer s.wg.Done()
@@ -79,13 +78,11 @@ func (s *Server) Serve(ctx context.Context, l *net.UnixListener) error {
 
 func (s *Server) handle(ctx context.Context, id uint64, conn *net.UnixConn) {
 	defer conn.Close()
-	go func() {
-		<-ctx.Done()
-		conn.Close()
-	}()
+	stop := context.AfterFunc(ctx, func() { conn.Close() })
+	defer stop()
 
 	log := s.Log.With("conn", id)
-	buf := make([]byte, 2*wire.MaxMessage)
+	buf := make([]byte, wire.MaxMessage+1) // one extra byte so oversized messages fail Decode
 	var proc *collect.Process
 	defer func() {
 		s.Collector.Close(id)

@@ -1,14 +1,14 @@
 package wire
 
-// Encoders mirror what libwarpspan.so sends. The agent never sends these; they
-// exist for tests and for tools that simulate a capture library.
+// Encoders mirror what libwarpspan.so sends. They are used by tests only.
 
-func header(typ uint16, payloadLen int) []byte {
+func header(typ uint16, pid uint32, payloadLen int) []byte {
 	b := make([]byte, HeaderSize, HeaderSize+payloadLen)
 	le.PutUint32(b[0:], Magic)
 	le.PutUint16(b[4:], Version)
 	le.PutUint16(b[6:], typ)
 	le.PutUint32(b[8:], uint32(payloadLen))
+	le.PutUint32(b[12:], pid)
 	return b
 }
 
@@ -19,14 +19,12 @@ func appendStr16(b []byte, s string) []byte {
 
 // EncodeHello encodes a Hello message.
 func EncodeHello(h *Hello) []byte {
-	var p []byte
-	p = le.AppendUint32(p, h.PID)
-	p = le.AppendUint32(p, uint32(len(h.Attrs)))
+	p := le.AppendUint32(nil, uint32(len(h.Attrs)))
 	for _, kv := range h.Attrs {
 		p = appendStr16(p, kv.Key)
 		p = appendStr16(p, kv.Value)
 	}
-	return append(header(TypeHello, len(p)), p...)
+	return append(header(TypeHello, h.PID, len(p)), p...)
 }
 
 // EncodeKernels encodes a Kernels message (names are interned per message).
@@ -39,8 +37,7 @@ func EncodeKernels(k *Kernels) []byte {
 			names = append(names, r.Name)
 		}
 	}
-	var p []byte
-	p = le.AppendUint64(p, k.DroppedTotal)
+	p := le.AppendUint64(nil, k.DroppedTotal)
 	p = le.AppendUint32(p, uint32(len(names)))
 	p = le.AppendUint32(p, uint32(len(k.Records)))
 	for _, n := range names {
@@ -51,16 +48,8 @@ func EncodeKernels(k *Kernels) []byte {
 		p = le.AppendUint64(p, r.EndNs)
 		p = append(p, r.TraceID[:]...)
 		p = append(p, r.SpanID[:]...)
-		p = le.AppendUint32(p, r.CorrelationID)
 		p = le.AppendUint32(p, index[r.Name])
 		p = le.AppendUint32(p, r.Device)
-		p = le.AppendUint32(p, r.Stream)
-		p = le.AppendUint32(p, r.ThreadID)
-		var flags uint32
-		if r.Linked {
-			flags |= FlagLinked
-		}
-		p = le.AppendUint32(p, flags)
 	}
-	return append(header(TypeKernels, len(p)), p...)
+	return append(header(TypeKernels, k.PID, len(p)), p...)
 }

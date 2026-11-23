@@ -5,6 +5,7 @@ package collect
 import (
 	"net/url"
 	"sort"
+	"strconv"
 	"strings"
 	"sync"
 	"time"
@@ -12,26 +13,33 @@ import (
 	"github.com/zraisan/warpspan/agent/wire"
 )
 
-// Attr is one resource attribute. Order is kept stable for deterministic output.
+// MaxKeysPerProcess caps distinct (kernel, device, span) samples per process
+// per interval, which bounds memory and export size. Kernels beyond the cap are
+// kept but recorded without their span.
+const MaxKeysPerProcess = 20_000
+
+// Attr is one resource attribute.
 type Attr struct {
 	Key, Value string
 }
 
 // Process is one injected process (one connection from libwarpspan.so).
 type Process struct {
-	ID       uint64 // agent-local connection id
 	PID      uint32
-	Resource []Attr // OTel resource attributes (service.name first)
+	Resource []Attr // OTel resource attributes, service.name first
 }
 
-// Key groups kernel executions into one profile sample.
+// Key groups kernel executions into one profile sample. TraceID/SpanID are
+// zero for kernels not launched inside a span.
 type Key struct {
 	Name    string
 	Device  uint32
 	TraceID [16]byte
 	SpanID  [8]byte
-	Linked  bool
 }
+
+// Linked reports whether the sample belongs to a span.
+func (k Key) Linked() bool { return k.SpanID != [8]byte{} }
 
 // Stat is the aggregate for one Key.
 type Stat struct {
@@ -41,9 +49,10 @@ type Stat struct {
 
 // ProcessSnapshot is what one process contributed during one interval.
 type ProcessSnapshot struct {
-	Process *Process
-	Samples map[Key]Stat
-	Dropped uint64 // records the capture library dropped during the interval
+	Process  *Process
+	Samples  map[Key]Stat
+	Dropped  uint64 // records the capture library lost during the interval
+	Unlinked int64  // kernels whose span was discarded because of MaxKeysPerProcess
 }
 
 // Snapshot is everything collected during one interval.
@@ -52,51 +61,37 @@ type Snapshot struct {
 	Processes  []ProcessSnapshot
 }
 
-// Totals summarises a snapshot (for logging).
-func (s *Snapshot) Totals() (kernels, linked, dropped int64) {
-	for _, p := range s.Processes {
-		for k, st := range p.Samples {
-			kernels += st.Count
-			if k.Linked {
-				linked += st.Count
-			}
-		}
-		dropped += int64(p.Dropped)
-	}
-	return
-}
-
 type procState struct {
-	proc         *Process
-	samples      map[Key]Stat
+	snap         ProcessSnapshot
 	droppedTotal uint64 // last DroppedTotal reported
 	droppedBase  uint64 // DroppedTotal at the start of the interval
+	seenDropped  bool
 	closed       bool
 }
 
 // Collector is safe for concurrent use.
 type Collector struct {
-	mu        sync.Mutex
-	procs     map[uint64]*procState
-	start     time.Time
-	extraAttr []Attr // added to every process resource (e.g. k8s.node.name)
+	mu    sync.Mutex
+	procs map[uint64]*procState
+	start time.Time
+	extra []Attr // added to every process resource (e.g. k8s.node.name)
 }
 
 // New returns a Collector. extra attributes are added to every resource.
 func New(extra []Attr) *Collector {
-	return &Collector{procs: map[uint64]*procState{}, start: time.Now(), extraAttr: extra}
+	return &Collector{procs: map[uint64]*procState{}, start: time.Now(), extra: extra}
 }
 
-// Hello registers a process.
+// Hello registers the process behind connection id.
 func (c *Collector) Hello(id uint64, h *wire.Hello) *Process {
-	p := &Process{ID: id, PID: h.PID, Resource: Resource(h, c.extraAttr)}
+	p := &Process{PID: h.PID, Resource: Resource(h, c.extra)}
 	c.mu.Lock()
-	c.procs[id] = &procState{proc: p, samples: map[Key]Stat{}}
+	c.procs[id] = &procState{snap: ProcessSnapshot{Process: p, Samples: map[Key]Stat{}}}
 	c.mu.Unlock()
 	return p
 }
 
-// Add records a batch of kernels for a process registered with Hello.
+// Add records a batch of kernels for a connection registered with Hello.
 func (c *Collector) Add(id uint64, k *wire.Kernels) {
 	c.mu.Lock()
 	defer c.mu.Unlock()
@@ -104,24 +99,33 @@ func (c *Collector) Add(id uint64, k *wire.Kernels) {
 	if ps == nil {
 		return
 	}
-	for _, r := range k.Records {
-		key := Key{Name: r.Name, Device: r.Device, Linked: r.Linked}
-		if r.Linked {
-			key.TraceID, key.SpanID = r.TraceID, r.SpanID
+	for i := range k.Records {
+		r := &k.Records[i]
+		key := Key{Name: r.Name, Device: r.Device, TraceID: r.TraceID, SpanID: r.SpanID}
+		st, ok := ps.snap.Samples[key]
+		if !ok && key.Linked() && len(ps.snap.Samples) >= MaxKeysPerProcess {
+			key.TraceID, key.SpanID = [16]byte{}, [8]byte{}
+			st = ps.snap.Samples[key]
+			ps.snap.Unlinked++
 		}
-		st := ps.samples[key]
 		st.Count++
 		if r.EndNs > r.StartNs {
 			st.TotalNs += int64(r.EndNs - r.StartNs)
 		}
-		ps.samples[key] = st
+		ps.snap.Samples[key] = st
+	}
+	// DroppedTotal is a lifetime counter; the first value seen (e.g. after an
+	// agent restart) is the baseline, not drops of this interval.
+	if !ps.seenDropped {
+		ps.seenDropped = true
+		ps.droppedBase = k.DroppedTotal
 	}
 	if k.DroppedTotal > ps.droppedTotal {
 		ps.droppedTotal = k.DroppedTotal
 	}
 }
 
-// Close marks a process as gone; it is removed after the next Snapshot.
+// Close marks a connection as gone; it is removed after the next Snapshot.
 func (c *Collector) Close(id uint64) {
 	c.mu.Lock()
 	if ps := c.procs[id]; ps != nil {
@@ -142,12 +146,14 @@ func (c *Collector) Snapshot(now time.Time) *Snapshot {
 	sort.Slice(ids, func(i, j int) bool { return ids[i] < ids[j] })
 	for _, id := range ids {
 		ps := c.procs[id]
-		dropped := ps.droppedTotal - ps.droppedBase
-		if len(ps.samples) > 0 || dropped > 0 {
-			s.Processes = append(s.Processes, ProcessSnapshot{Process: ps.proc, Samples: ps.samples, Dropped: dropped})
+		if ps.droppedTotal > ps.droppedBase {
+			ps.snap.Dropped = ps.droppedTotal - ps.droppedBase
 		}
-		ps.samples = map[Key]Stat{}
-		ps.droppedBase = ps.droppedTotal
+		if len(ps.snap.Samples) > 0 || ps.snap.Dropped > 0 {
+			s.Processes = append(s.Processes, ps.snap)
+		}
+		ps.snap = ProcessSnapshot{Process: ps.snap.Process, Samples: map[Key]Stat{}}
+		ps.droppedBase = max(ps.droppedBase, ps.droppedTotal)
 		if ps.closed {
 			delete(c.procs, id)
 		}
@@ -171,7 +177,8 @@ func Resource(h *wire.Hello, extra []Attr) []Attr {
 	for _, a := range extra {
 		attrs[a.Key] = a.Value
 	}
-	for _, k := range []string{"process.pid", "process.executable.name", "host.name", "container.id"} {
+	attrs["process.pid"] = strconv.FormatUint(uint64(h.PID), 10)
+	for _, k := range []string{"process.executable.name", "host.name"} {
 		if v := hello[k]; v != "" {
 			attrs[k] = v
 		}
@@ -189,7 +196,7 @@ func Resource(h *wire.Hello, extra []Attr) []Attr {
 		}
 	}
 
-	out := []Attr{{"service.name", attrs["service.name"]}}
+	out := []Attr{{Key: "service.name", Value: attrs["service.name"]}}
 	delete(attrs, "service.name")
 	keys := make([]string, 0, len(attrs))
 	for k := range attrs {
@@ -197,7 +204,7 @@ func Resource(h *wire.Hello, extra []Attr) []Attr {
 	}
 	sort.Strings(keys)
 	for _, k := range keys {
-		out = append(out, Attr{k, attrs[k]})
+		out = append(out, Attr{Key: k, Value: attrs[k]})
 	}
 	return out
 }
