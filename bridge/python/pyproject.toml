@@ -1,0 +1,23 @@
+[build-system]
+requires = ["setuptools>=68"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "warpspan"
+version = "0.1.0"
+description = "Span bridge linking OpenTelemetry spans to GPU kernels captured by libwarpspan.so"
+requires-python = ">=3.9"
+dependencies = ["opentelemetry-api>=1.20"]
+
+[project.optional-dependencies]
+test = ["pytest", "opentelemetry-sdk>=1.20"]
+
+[tool.setuptools.packages.find]
+where = ["src"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+pythonpath = ["src"]
+
+[tool.ruff]
+line-length = 110
