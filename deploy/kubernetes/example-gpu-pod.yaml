@@ -1,0 +1,62 @@
+# What enabling warpspan on a GPU workload looks like, done by hand. A mutating
+# webhook would add exactly these fields automatically (not built yet).
+#
+# Added to the app pod:
+#   1. init container that copies libwarpspan.so + libcupti + the Python bridge
+#      into an emptyDir
+#   2. env: CUDA_INJECTION64_PATH (CUDA loads the .so), PYTHONPATH (Python loads
+#      the bridge), WARPSPAN_SOCKET (where the node agent listens)
+#   3. the agent's socket directory from the node (hostPath)
+#
+# Note: hostPath volumes are rejected by the "baseline"/"restricted" Pod Security
+# levels; such namespaces need an exception for this volume.
+apiVersion: v1
+kind: Pod
+metadata:
+  name: torch-spans-example
+spec:
+  restartPolicy: Never
+  volumes:
+    - name: warpspan
+      emptyDir: {}
+    - name: warpspan-run
+      hostPath:
+        path: /var/run/warpspan
+        type: DirectoryOrCreate
+  initContainers:
+    - name: warpspan-init
+      image: ghcr.io/zraisan/warpspan-inject:0.1.0
+      volumeMounts:
+        - name: warpspan
+          mountPath: /target
+  containers:
+    - name: app
+      image: your-pytorch-app:latest
+      env:
+        - name: POD_NAME
+          valueFrom:
+            fieldRef:
+              fieldPath: metadata.name
+        - name: POD_NAMESPACE
+          valueFrom:
+            fieldRef:
+              fieldPath: metadata.namespace
+        - name: OTEL_SERVICE_NAME
+          value: torch-spans-example
+        - name: OTEL_RESOURCE_ATTRIBUTES
+          value: k8s.pod.name=$(POD_NAME),k8s.namespace.name=$(POD_NAMESPACE)
+        - name: CUDA_INJECTION64_PATH
+          value: /warpspan/libwarpspan.so
+        - name: PYTHONPATH # if the image already sets PYTHONPATH, prepend /warpspan/python to it
+          value: /warpspan/python
+        - name: WARPSPAN_SOCKET
+          value: /var/run/warpspan/warpspan.sock
+      volumeMounts:
+        - name: warpspan
+          mountPath: /warpspan
+          readOnly: true
+        - name: warpspan-run
+          mountPath: /var/run/warpspan
+      resources:
+        limits:
+          nvidia.com/gpu: 1

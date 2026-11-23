@@ -1,0 +1,75 @@
+# 0002: Span bridge mechanism, local transport and profile shape
+
+- **Status:** accepted
+- **Date:** 2026-11-24
+
+Resolves the "span bridge mechanism" open question of ADR 0001 and fixes the
+first versions of the local transport and the exported profile format.
+
+## Decisions
+
+### 1. Span bridge: thread-local set through an exported C function
+
+`libwarpspan.so` exports `warpspan_set_span(trace_id[16], span_id[8])`, which
+stores the span in a `thread_local`. The CUPTI launch callback runs on the app
+thread, so it reads the same thread-local with no locks.
+
+The Python bridge wraps `opentelemetry.context._RUNTIME_CONTEXT` and calls
+`warpspan_set_span` after every `attach` / `detach`, so it tracks what
+`start_as_current_span` makes current (not merely started spans). It is loaded
+through `sitecustomize` on `PYTHONPATH`, which needs no app changes and chains
+to any other `sitecustomize`. It loads the library with `ctypes.PyDLL` from the
+same path as `CUDA_INJECTION64_PATH`; `dlopen` returns the copy CUDA loads, so
+both share one thread-local.
+
+**Alternatives:** CUPTI external correlation (push/pop per span, but it needs
+CUPTI loaded before the bridge runs, and still needs a span→trace map); NVTX
+ranges (string-based and slower, and NVTX can be disabled by the app). Either
+can be added later behind the same bridge API.
+
+**Known gaps:**
+- *asyncio:* tasks switch contextvars without attach/detach, so the last
+  attached span on the event-loop thread wins.
+- *Kernels launched from other threads:* the span doesn't propagate. One example
+  is PyTorch autograd's backward pass, which runs on engine threads. Those kernels
+  are captured but unlinked.
+- *CUDA graphs:* kernels in a graph launch share the graph launch's correlation
+  ID and are linked to the span active at `cudaGraphLaunch`.
+
+### 2. Join table
+
+`correlation_id → (span, tid)` lives in a direct-mapped table of 2^17 slots, with
+a per-slot seqlock. Writing at launch is a few relaxed stores, with no
+allocation or locks. If more than 131k launches happen between two activity
+flushes (1 s by default), older entries are overwritten and those kernels
+become unlinked.
+
+### 3. Transport: unix SOCK_SEQPACKET, non-blocking, drop on pressure
+
+There's a single socket on the node, shared via `hostPath` in Kubernetes. See
+`docs/protocol.md`. Writes happen from the flush thread or CUPTI's worker
+thread, never from app threads. On `EAGAIN` the batch is dropped and counted;
+the app is never slowed down. The library has no gRPC or protobuf (see ADR 0001).
+
+### 4. Profile shape (OTLP profiles, Pyroscope)
+
+Per process, in one `ResourceProfiles`, there are two profiles:
+`gpu_time` (nanoseconds) and `kernel_launches` (count). Both use period type
+`gpu/nanoseconds`, so Pyroscope names them `gpu`. The type IDs are
+`gpu:gpu_time:nanoseconds:gpu:nanoseconds` and
+`gpu:kernel_launches:count:gpu:nanoseconds`. The stack is
+`cuda:<device> > <demangled kernel name>`. The launching span is the sample's
+`Link`, which Pyroscope turns into `span_id`/`trace_id` labels for
+traces-to-profiles.
+
+`service.name` follows the OTel SDK rules from the process's own
+`OTEL_SERVICE_NAME`/`OTEL_RESOURCE_ATTRIBUTES`, so profiles and traces land in
+the same service.
+
+## Consequences
+
+- No CPU (Python/native) stacks yet. Frames are only device + kernel. Adding
+  CPU stacks at launch is future work and has to stay cheap.
+- Pinned, tested combination: OTLP profiles proto v0.4.1 (wire-identical to
+  v0.3.0), Collector v0.165 with `--feature-gates=service.profilesSupport`,
+  Pyroscope v2.4.4.

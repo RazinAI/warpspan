@@ -1,0 +1,34 @@
+# OpenTelemetry Collector (v0.165.x core distribution).
+# Profiles are alpha: the Collector must run with --feature-gates=service.profilesSupport
+receivers:
+  otlp:
+    protocols:
+      grpc:
+        endpoint: 0.0.0.0:4317
+      http:
+        endpoint: 0.0.0.0:4318
+
+processors:
+  batch: {}
+
+exporters:
+  otlp_grpc/pyroscope:
+    endpoint: pyroscope:4040
+    tls:
+      insecure: true
+  otlp_grpc/tempo:
+    endpoint: tempo:4317
+    tls:
+      insecure: true
+  debug:
+    verbosity: basic
+
+service:
+  pipelines:
+    traces:
+      receivers: [otlp]
+      processors: [batch]
+      exporters: [otlp_grpc/tempo]
+    profiles:
+      receivers: [otlp]
+      exporters: [otlp_grpc/pyroscope, debug]

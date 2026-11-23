@@ -1,0 +1,21 @@
+apiVersion: 1
+
+datasources:
+  - name: Pyroscope
+    type: grafana-pyroscope-datasource
+    uid: pyroscope
+    url: http://pyroscope:4040
+    isDefault: true
+
+  - name: Tempo
+    type: tempo
+    uid: tempo
+    url: http://tempo:3200
+    jsonData:
+      # "Profiles for this span" button in the trace view.
+      tracesToProfiles:
+        datasourceUid: pyroscope
+        profileTypeId: "gpu:gpu_time:nanoseconds:gpu:nanoseconds"
+        tags:
+          - key: service.name
+            value: service_name
