@@ -83,7 +83,7 @@ own request.
   CPU stacks at launch is future work and has to stay cheap.
 - Pinned, tested combination: OTLP profiles proto v0.4.1 (wire-identical to
   v0.3.0), Collector v0.165 with `--feature-gates=service.profilesSupport`,
-  Pyroscope v2.4.4. Verified locally: vecadd profiles appear in Pyroscope as
-  `gpu:gpu_time:nanoseconds:gpu:nanoseconds`, under the right service.
+  Pyroscope v2.4.4. Verified locally with PyTorch: Pyroscope's span-profile
+  query, given a span ID from Tempo, returns that span's kernels.
 - Pyroscope 2.4.4 keeps `service_name` as a series label but did not keep the
   other resource attributes (`host.name`, `process.pid`) in that test.

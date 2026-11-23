@@ -306,7 +306,7 @@ void add_kernel_locked(const char *name, uint64_t start, uint64_t end, uint32_t 
 
 void debug_kernel(const char *name, uint64_t start, uint64_t end, uint32_t corr, uint32_t device,
                   const SpanCtx &span, bool linked) {
-  char ids[64] = "trace_id=- span_id=-";
+  char ids[80] = "trace_id=- span_id=-";  // linked: 9 + 32 + 9 + 16 + NUL = 67 bytes
   if (linked) {
     uint8_t b[24];
     std::memcpy(b, span.w, sizeof b);

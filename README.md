@@ -31,11 +31,18 @@ variables set at process start.
 3070, CUDA 13.4, driver 615). The build has guards for CUDA 11.6+, but older
 versions have not been tried.
 
-What has been verified: CUDA kernels get captured and sent through the agent and
-Collector into Pyroscope (profile type `gpu`, correct `service.name`). The Python
-bridge tracks the active span (unit tests, `opentelemetry-instrument`).
-Not yet verified end to end: span links on a real PyTorch workload, and Grafana's
-traces-to-profiles view.
+Verified on that machine, with the docker-compose stack (Collector 0.165,
+Pyroscope 2.4.4, Tempo 2.10, Grafana 13.3):
+
+- PyTorch example (`examples/torch-spans`): all 130 kernels of 10 requests
+  were linked to the right child span (preprocess / forward / postprocess).
+- Taking a span ID from the trace in Tempo and asking Pyroscope for that span's
+  profile returns exactly the kernels that span ran. This is the query behind
+  Grafana's traces-to-profiles; the button itself hasn't been clicked through.
+- The bridge also loads under `opentelemetry-instrument`.
+- The inject image (CUDA 12.6 build) loads its bundled libcupti inside a plain
+  CUDA runtime image. It hasn't been run on a GPU there (no NVIDIA container
+  toolkit on the test machine).
 
 ## Build
 
