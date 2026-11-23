@@ -1,0 +1,15 @@
+# Build outputs (C/C++/CUDA)
+*.o
+*.so
+*.a
+build/
+
+# Example binaries
+examples/vecadd/add_cuda
+
+# Go
+/bin/
+
+# Editor / OS
+.DS_Store
+*.swp
