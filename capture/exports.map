@@ -1,0 +1,12 @@
+/* Only these symbols are visible outside libwarpspan.so. Everything else
+   (including statically linked libstdc++ code) stays local, so it can never
+   clash with the libraries of the app we are injected into. */
+{
+  global:
+    InitializeInjection;
+    warpspan_abi_version;
+    warpspan_set_span;
+    warpspan_get_span;
+  local:
+    *;
+};
