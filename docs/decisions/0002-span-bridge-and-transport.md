@@ -57,7 +57,7 @@ most Rust services use OpenTelemetry. The bridge is a `tracing` layer: on every
 span enter and exit it reads `opentelemetry::Context::current()`, which the
 OpenTelemetry layer (with its default context activation) has just set, so it
 must come after that layer. Instrumented futures enter their span on every
-poll, so unlike asyncio in Python they are attributed per poll; work moved to
+poll, so they are attributed per poll (as asyncio is on Python 3.14+); work moved to
 `spawn_blocking`, rayon or un-instrumented tasks is not. Plain
 `opentelemetry::Context::attach` without a `tracing` span isn't seen.
 opentelemetry 0.33 has an experimental context observer that would cover it,
@@ -73,8 +73,27 @@ ranges (string-based and slower, and NVTX can be disabled by the app). Either
 can be added later behind the same bridge API.
 
 **Known gaps:**
-- *asyncio:* tasks switch contextvars without attach/detach, so the last
-  attached span on the event-loop thread wins.
+- *Context switches without attach/detach (Python):* asyncio runs each task
+  step in the task's context, and thread pools (FastAPI sync endpoints,
+  `run_in_executor` with a copied context) run work in a copied context.
+  Neither goes through OTel's attach/detach. On Python 3.14+ the bridge also
+  stores the span's 24 ID bytes in a ContextVar and registers a context watcher
+  (`PyContext_AddWatcher`) implemented in libwarpspan.so
+  (`warpspan_python_watch`), which republishes that value on every switch. The
+  C API functions are passed in from `ctypes.pythonapi`, so the library needs no
+  Python headers. The watcher saves and restores the current exception, since it
+  also runs while an exception passes through `Context.run`. It costs about
+  0.1-0.2 µs per asyncio task step (measured on an empty step, about 5.3 µs).
+  Not covered:
+  - before 3.14, the last span attached on the thread wins;
+  - sub-interpreters: the library has one watcher slot, taken by the first
+    interpreter (normally the main one), so the others keep the pre-3.14
+    behaviour;
+  - contexts that attached a span before `install()` carry no IDs until their
+    next attach;
+  - gevent/greenlet switch contexts without watcher events (not verified);
+  - the watcher overwrites the thread's span on every switch, so on a thread
+    where another bridge (C++, Rust) set a span, the Python one wins.
 - *Kernels launched from other threads:* the span doesn't propagate. One example
   is PyTorch autograd's backward pass, which runs on engine threads. Those kernels
   are captured but unlinked.

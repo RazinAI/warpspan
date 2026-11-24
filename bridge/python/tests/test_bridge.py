@@ -6,11 +6,14 @@ Build it first: make -C capture
 
 from __future__ import annotations
 
+import asyncio
+import contextvars
 import os
 import shutil
 import subprocess
 import sys
 import threading
+from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
 
 import pytest
@@ -162,3 +165,89 @@ def test_opentelemetry_instrument_entry_point():
     env.pop("PYTHONPATH", None)
     out = subprocess.run([exe, sys.executable, "-c", code], env=env, capture_output=True, text=True, check=True)
     assert out.stdout.strip() == "True", out.stderr
+
+
+needs_context_watchers = pytest.mark.skipif(sys.version_info < (3, 14), reason="context watchers need Python 3.14")
+
+
+@needs_context_watchers
+def test_asyncio_tasks_each_get_their_own_span():
+    results = {}
+
+    async def worker(name):
+        with tracer.start_as_current_span(name) as span:
+            await asyncio.sleep(0)  # the other task attaches its span meanwhile
+            await asyncio.sleep(0)
+            results[name] = (_current_span(), ids(span))
+
+    async def main():
+        await asyncio.gather(worker("a"), worker("b"))
+
+    asyncio.run(main())
+    for name, (published, expected) in results.items():
+        assert published == expected, name
+    assert _current_span() is None
+
+
+@needs_context_watchers
+def test_copied_context_in_thread_pool():
+    with tracer.start_as_current_span("request") as span:
+        ctx = contextvars.copy_context()
+    with ThreadPoolExecutor(max_workers=1) as pool:
+        assert pool.submit(ctx.run, _current_span).result() == ids(span)
+        assert pool.submit(_current_span).result() is None  # cleared when the context exits
+
+
+@needs_context_watchers
+def test_exceptions_pass_through_context_switches():
+    def boom():
+        raise ValueError("app error")
+
+    with pytest.raises(ValueError, match="app error"):
+        contextvars.copy_context().run(boom)  # no span in this context
+    with pytest.raises(ValueError, match="app error"):
+        asyncio.run(asyncio.to_thread(boom))
+    with pytest.raises(StopIteration):
+        contextvars.copy_context().run(next, iter(()))
+
+
+@needs_context_watchers
+def test_span_attached_inside_copied_context():
+    def work():
+        with tracer.start_as_current_span("inside") as span:
+            inner = _current_span()
+        return inner, ids(span), _current_span()
+
+    inner, expected, after = contextvars.copy_context().run(work)
+    assert inner == expected
+    assert after is None
+    assert _current_span() is None
+
+
+@needs_context_watchers
+def test_sub_interpreter_install_keeps_main_working(tmp_path):
+    # In a subprocess: a crash there must fail the test, not pytest.
+    script = tmp_path / "subinterp.py"
+    script.write_text(
+        f"""
+import contextvars
+from concurrent import interpreters
+from opentelemetry.sdk.trace import TracerProvider
+import warpspan
+from warpspan._bridge import _current_span
+assert warpspan.install({str(LIB)!r})
+tracer = TracerProvider().get_tracer("t")
+
+sub = interpreters.create()
+sub.exec("import warpspan; warpspan.install({str(LIB)!r})")
+with tracer.start_as_current_span("main") as span:
+    ctx = contextvars.copy_context()
+want = (span.get_span_context().trace_id, span.get_span_context().span_id)
+assert ctx.run(_current_span) == want, "main interpreter lost its watcher"
+sub.close()
+assert ctx.run(_current_span) == want
+print("ok")
+"""
+    )
+    out = subprocess.run([sys.executable, str(script)], capture_output=True, text=True, timeout=60)
+    assert out.returncode == 0 and out.stdout.strip() == "ok", out.stderr

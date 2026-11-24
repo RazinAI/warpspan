@@ -176,9 +176,12 @@ Tested with Collector 0.165.0 and Pyroscope 2.4.4.
 
 - Only kernels: no memcpy/memset, no CPU or Python stacks.
 - Span linking works per thread and needs a span bridge (Python, C++, Go, Java
-  and Rust so far).
-  asyncio, and kernels launched from other threads (e.g. autograd backward), end
-  up unlinked or attributed to the last span on that thread. See ADR 0002.
+  and Rust so far). Kernels launched from threads the span doesn't reach (e.g.
+  PyTorch's autograd backward) are unlinked. In Python before 3.14, asyncio
+  tasks and thread pools running a copied context switch spans without telling
+  the bridge, so their kernels can get the span last attached on that thread.
+  3.14+ handles both in the main interpreter (context watchers); not in
+  sub-interpreters, and not with gevent/greenlet. See ADR 0002.
 - Records are dropped rather than slowing the app: on CUPTI buffer overflow and
   when the agent is busy. If more than 131k launches happen between flushes, the
   oldest are still counted but lose their span.
@@ -195,4 +198,6 @@ make test   # Go tests + Python bridge tests (pip install opentelemetry-sdk pyte
             #   opentelemetry-cpp sources, + Java bridge tests if MAVEN_JARS
             #   holds the OpenTelemetry jars (see bridge/java/Makefile),
             #   + Rust bridge tests if cargo is installed
+            # The Python 3.14 context-watcher tests need PYTHON=python3.14 (with
+            # opentelemetry-sdk and pytest); older Pythons skip them.
 ```

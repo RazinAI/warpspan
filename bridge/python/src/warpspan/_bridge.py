@@ -15,16 +15,19 @@ When a span becomes current it also gets the attribute ``pyroscope.profile.id``
 (its span ID in hex). Grafana shows "Profiles for this span" only on spans that
 have it, and queries Pyroscope for that span ID.
 
-Known limitation: asyncio tasks switch context without attach/detach, so with
-many concurrent requests on one event-loop thread a kernel can be attributed to
-the span attached last on that thread.
+asyncio task steps and thread pools running a copied context switch contexts
+without attach/detach. On Python 3.14+ (main interpreter only) the bridge also
+keeps the span's IDs in a ContextVar and registers a context watcher in
+libwarpspan.so that republishes them on every switch; see ADR 0002.
 """
 
 from __future__ import annotations
 
+import contextvars
 import ctypes
 import logging
 import os
+import sys
 import threading
 from typing import Any
 
@@ -37,6 +40,10 @@ _ABI_VERSION = 1
 _PROFILE_ID_ATTR = "pyroscope.profile.id"
 
 _lock = threading.Lock()
+# trace_id + span_id (24 bytes) of the published span, or b"", for the context
+# watcher. Only kept up to date while the watcher is registered.
+_ids: contextvars.ContextVar[bytes] = contextvars.ContextVar("warpspan_span", default=b"")
+_watcher_id: int | None = None
 # Span ID last tagged on each thread: set_attribute takes a lock in the SDK, and
 # the same span is re-attached whenever only other context values change.
 _tagged = threading.local()
@@ -84,14 +91,62 @@ class _WarpspanRuntimeContext(_RuntimeContext):
             span = trace.get_current_span(context)
             sc = span.get_span_context()
             if sc.is_valid and sc.trace_flags.sampled and not sc.is_remote:
-                self._set_span(sc.trace_id.to_bytes(16, "big"), sc.span_id.to_bytes(8, "big"))
+                trace_id, span_id = sc.trace_id.to_bytes(16, "big"), sc.span_id.to_bytes(8, "big")
+                self._set_span(trace_id, span_id)
+                if _watcher_id is not None:
+                    _ids.set(trace_id + span_id)
                 if tag and getattr(_tagged, "span_id", 0) != sc.span_id and span.is_recording():
                     span.set_attribute(_PROFILE_ID_ATTR, format(sc.span_id, "016x"))
                     _tagged.span_id = sc.span_id
             else:
                 self._set_span(None, None)
+                if _watcher_id is not None:
+                    _ids.set(b"")
         except Exception:  # never break the app's tracing
             _log.debug("warpspan: failed to publish span", exc_info=True)
+
+
+class _PythonApi(ctypes.Structure):
+    """warpspan_python_api in capture/include/warpspan.h."""
+
+    _fields_ = [
+        ("contextvar", ctypes.py_object),
+        ("add_watcher", ctypes.c_void_p),
+        ("contextvar_get", ctypes.c_void_p),
+        ("bytes_as_string", ctypes.c_void_p),
+        ("bytes_size", ctypes.c_void_p),
+        ("inc_ref", ctypes.c_void_p),
+        ("dec_ref", ctypes.c_void_p),
+        ("get_raised_exception", ctypes.c_void_p),
+        ("set_raised_exception", ctypes.c_void_p),
+    ]
+
+
+_API_FUNCTIONS = (
+    "PyContext_AddWatcher",
+    "PyContextVar_Get",
+    "PyBytes_AsString",
+    "PyBytes_Size",
+    "Py_IncRef",
+    "Py_DecRef",
+    "PyErr_GetRaisedException",
+    "PyErr_SetRaisedException",
+)
+
+
+def _watch_contexts(lib: ctypes.PyDLL) -> int | None:
+    """Registers the context watcher; returns its id, or None if unavailable."""
+    if sys.version_info < (3, 14):
+        return None
+    try:
+        watch = lib.warpspan_python_watch  # missing in older libraries
+        funcs = [ctypes.cast(getattr(ctypes.pythonapi, f), ctypes.c_void_p).value for f in _API_FUNCTIONS]
+    except AttributeError:
+        return None
+    watch.argtypes = [ctypes.POINTER(_PythonApi)]
+    watch.restype = ctypes.c_int
+    watcher = watch(ctypes.byref(_PythonApi(_ids, *funcs)))
+    return watcher if watcher >= 0 else None  # -1: e.g. another interpreter has it
 
 
 def install(library_path: str | None = None) -> bool:
@@ -101,7 +156,7 @@ def install(library_path: str | None = None) -> bool:
     if the bridge is active. Never raises: if anything is missing the app runs
     as before.
     """
-    global _lib, _wrapper
+    global _lib, _wrapper, _watcher_id
     with _lock:
         if _wrapper is not None:
             return True
@@ -119,6 +174,7 @@ def install(library_path: str | None = None) -> bool:
         wrapper = _WarpspanRuntimeContext(otel_context._RUNTIME_CONTEXT, lib)
         otel_context._RUNTIME_CONTEXT = wrapper
         _lib, _wrapper = lib, wrapper
+        _watcher_id = _watch_contexts(lib)
         wrapper._publish(wrapper.get_current())  # a span may already be active
         return True
 
@@ -128,7 +184,7 @@ def install(library_path: str | None = None) -> bool:
 
 def _uninstall() -> None:
     """Restore the original runtime context (clears only the calling thread's span)."""
-    global _lib, _wrapper
+    global _lib, _wrapper, _watcher_id
     with _lock:
         if _wrapper is None:
             return
@@ -136,6 +192,10 @@ def _uninstall() -> None:
 
         if otel_context._RUNTIME_CONTEXT is _wrapper:
             otel_context._RUNTIME_CONTEXT = _wrapper._inner
+        if _watcher_id is not None:
+            ctypes.pythonapi.PyContext_ClearWatcher(_watcher_id)
+            _watcher_id = None
+        _ids.set(b"")
         if _lib is not None:
             _lib.warpspan_set_span(None, None)
         _lib, _wrapper = None, None

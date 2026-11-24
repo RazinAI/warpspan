@@ -8,6 +8,7 @@
     warpspan_set_span;
     warpspan_get_span;
     warpspan_flush;
+    warpspan_python_watch;
   local:
     *;
 };

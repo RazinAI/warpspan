@@ -42,6 +42,36 @@ int warpspan_get_span(uint8_t *trace_id, uint8_t *span_id);
  */
 void warpspan_flush(void);
 
+/*
+ * Python 3.14+ context watcher, used by the Python span bridge (see ADR 0002).
+ * contextvar holds the current span's IDs (24 bytes: trace_id, span_id) or
+ * b"". On every context switch the watcher publishes the value in the new
+ * context. The Python C API functions are passed in, so the library needs no
+ * Python headers or symbols; PyObject * is void * here.
+ */
+typedef struct {
+  void *contextvar; /* the library keeps a reference */
+  int (*add_watcher)(int (*callback)(int event, void *context));
+  int (*contextvar_get)(void *var, void *default_value, void **value);
+  char *(*bytes_as_string)(void *bytes);
+  intptr_t (*bytes_size)(void *bytes);
+  void (*inc_ref)(void *object);
+  void (*dec_ref)(void *object);
+  void *(*get_raised_exception)(void);
+  void (*set_raised_exception)(void *exception);
+} warpspan_python_api;
+
+/*
+ * Register the watcher; call with the GIL held. Returns the watcher id, or -1
+ * if PyContext_AddWatcher fails or a different contextvar is already
+ * registered: the library has one slot, so only the first interpreter that
+ * registers gets the watcher (sub-interpreters keep the pre-3.14 behaviour).
+ * Registering the same contextvar again (after PyContext_ClearWatcher) is
+ * allowed. Added after ABI version 1 was published: look it up as an optional
+ * symbol.
+ */
+int warpspan_python_watch(const warpspan_python_api *api);
+
 #ifdef __cplusplus
 }
 #endif

@@ -521,6 +521,37 @@ WARPSPAN_EXPORT void warpspan_flush(void) {
   flush_activity(CUPTI_ACTIVITY_FLAG_FLUSH_FORCED);
 }
 
+namespace {
+warpspan_python_api g_py{};  // set by warpspan_python_watch; read by the watcher
+
+// Called by CPython on the thread whose context switched, with its thread
+// state attached. It can run while an exception passes through Context.run,
+// so it saves and restores the current exception around its own C API calls.
+int on_python_context_switch(int event, void *) {
+  constexpr int kContextSwitched = 1;  // Py_CONTEXT_SWITCHED
+  if (event != kContextSwitched) return 0;
+  void *exception = g_py.get_raised_exception();
+  SpanCtx s{};
+  void *value = nullptr;
+  if (g_py.contextvar_get(g_py.contextvar, nullptr, &value) == 0 && value) {
+    if (g_py.bytes_size(value) == 24) {
+      if (const char *bytes = g_py.bytes_as_string(value)) std::memcpy(s.w, bytes, 24);
+    }
+    g_py.dec_ref(value);
+  }
+  t_span = s.valid() ? s : SpanCtx{};
+  g_py.set_raised_exception(exception);  // also drops any error raised above
+  return 0;
+}
+}  // namespace
+
+WARPSPAN_EXPORT int warpspan_python_watch(const warpspan_python_api *api) {
+  if (g_py.contextvar && g_py.contextvar != api->contextvar) return -1;  // another interpreter
+  if (!g_py.contextvar) api->inc_ref(api->contextvar);  // kept for the life of the process
+  g_py = *api;
+  return g_py.add_watcher(on_python_context_switch);
+}
+
 // Called by the CUDA driver. Return 1 on success. We always return 1: if
 // profiling can't start, the app must keep running unaffected.
 WARPSPAN_EXPORT int InitializeInjection(void) {
