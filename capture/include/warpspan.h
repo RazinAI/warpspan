@@ -32,6 +32,16 @@ void warpspan_set_span(const uint8_t *trace_id, const uint8_t *span_id);
  */
 int warpspan_get_span(uint8_t *trace_id, uint8_t *span_id);
 
+/*
+ * Hand all records of finished kernels to the agent now, as the library does at
+ * exit through atexit(), which runtimes such as Go skip. Synchronise the GPU
+ * first: kernels still running are not included. Records are dropped, as
+ * always, if the agent isn't connected or is busy. Blocks until CUPTI has
+ * delivered its buffers; does nothing before CUDA is initialised. Added after
+ * ABI version 1 was published: look it up as an optional symbol.
+ */
+void warpspan_flush(void);
+
 #ifdef __cplusplus
 }
 #endif

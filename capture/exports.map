@@ -7,6 +7,7 @@
     warpspan_abi_version;
     warpspan_set_span;
     warpspan_get_span;
+    warpspan_flush;
   local:
     *;
 };

@@ -30,10 +30,21 @@ OpenTelemetry C++ API: `Install()` sets a `RuntimeContextStorage` that wraps the
 default thread-local storage and publishes after each `Attach` / `Detach`. The
 API only allows replacing the storage at startup, before other threads use
 it, so the app has to call `Install()` there; C++ has no equivalent of
-`sitecustomize`. Both bridges set `pyroscope.profile.id` once per span and
+`sitecustomize`. All bridges set `pyroscope.profile.id` once per span and
 thread, since `SetAttribute` takes a lock in the SDKs.
 
-Each bridge only depends on its language's OTel API, never the SDK. The app
+Go keeps the span in `context.Context`, not per thread, and goroutines move
+between OS threads, so there is nothing to hook. The Go bridge (`bridge/go`)
+instead wraps the cgo calls that launch GPU work: `Do(ctx, fn)` locks the OS
+thread, publishes the span from `ctx`, runs `fn` and restores the previous span.
+Only launches on that OS thread are linked: not those from goroutines `fn`
+starts, nor from threads a C library or Go CUDA binding launches on. Go also
+exits without running C `atexit` handlers, so the library exports
+`warpspan_flush()` (optional symbol, no ABI bump) and the bridge exposes it as
+`Flush()`.
+
+At runtime each bridge only uses its language's OTel API, never the SDK (the
+SDK is a test dependency only). The app
 keeps whatever SDK it configures.
 
 **Alternatives:** CUPTI external correlation (push/pop per span, but it needs

@@ -210,6 +210,9 @@ struct State {
 };
 
 State *g = nullptr;
+// Set once InitializeInjection has finished. CUPTI callbacks can only run after
+// start_cupti, but warpspan_flush can be called from any thread at any time.
+std::atomic<bool> g_ready{false};
 
 // --- socket (out_mu held) ---------------------------------------------------
 
@@ -509,6 +512,15 @@ WARPSPAN_EXPORT int warpspan_get_span(uint8_t *trace_id, uint8_t *span_id) {
   return s.valid() ? 1 : 0;
 }
 
+WARPSPAN_EXPORT void warpspan_flush(void) {
+  if (!g_ready.load(std::memory_order_acquire) || g->disabled.load()) return;
+  {
+    std::lock_guard<std::mutex> lock(g->out_mu);
+    connect_locked();
+  }
+  flush_activity(CUPTI_ACTIVITY_FLAG_FLUSH_FORCED);
+}
+
 // Called by the CUDA driver. Return 1 on success. We always return 1: if
 // profiling can't start, the app must keep running unaffected.
 WARPSPAN_EXPORT int InitializeInjection(void) {
@@ -552,6 +564,7 @@ WARPSPAN_EXPORT int InitializeInjection(void) {
   std::atexit(on_exit);
   if (!start_flush_thread()) log("could not start background thread; kernels are sent only when buffers fill");
 
+  g_ready.store(true, std::memory_order_release);
   log("loaded (pid %d, agent socket %s)", static_cast<int>(getpid()),
       g->socket_path.empty() ? "<none>" : g->socket_path.c_str());
   return 1;
