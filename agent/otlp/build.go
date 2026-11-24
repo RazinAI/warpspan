@@ -22,7 +22,6 @@ import (
 	"fmt"
 	"sort"
 
-	"github.com/ianlancetaylor/demangle"
 	collectorpb "go.opentelemetry.io/proto/otlp/collector/profiles/v1development"
 	commonpb "go.opentelemetry.io/proto/otlp/common/v1"
 	profilespb "go.opentelemetry.io/proto/otlp/profiles/v1development"
@@ -46,10 +45,6 @@ type Options struct {
 	ScopeVersion string
 }
 
-// kernelFrame demangles a C++ kernel name, dropping parameters to keep frames
-// readable. Non-C++ names are returned unchanged.
-func kernelFrame(name string) string { return demangle.Filter(name, demangle.NoParams) }
-
 // Build converts a snapshot into one export request. It returns nil when there
 // is nothing to export.
 func Build(s *collect.Snapshot, opts Options) *collectorpb.ExportProfilesServiceRequest {
@@ -57,6 +52,7 @@ func Build(s *collect.Snapshot, opts Options) *collectorpb.ExportProfilesService
 	req := &collectorpb.ExportProfilesServiceRequest{Dictionary: d.d}
 	start := uint64(s.Start.UnixNano())
 	duration := uint64(s.End.Sub(s.Start).Nanoseconds())
+	frames := map[string]string{} // kernel name -> frame; many samples share a kernel
 
 	for _, ps := range s.Processes {
 		if len(ps.Samples) == 0 {
@@ -72,7 +68,12 @@ func Build(s *collect.Snapshot, opts Options) *collectorpb.ExportProfilesService
 		countProfile := d.newProfile(CountSampleType, "count", start, duration)
 		for _, k := range keys {
 			st := ps.Samples[k]
-			stack := d.stack(kernelFrame(k.Name), fmt.Sprintf("cuda:%d", k.Device))
+			frame, ok := frames[k.Name]
+			if !ok {
+				frame = kernelFrame(k.Name)
+				frames[k.Name] = frame
+			}
+			stack := d.stack(frame, fmt.Sprintf("cuda:%d", k.Device))
 			var link int32
 			if k.Linked() {
 				link = d.link(k.TraceID, k.SpanID)

@@ -66,7 +66,13 @@ Per process, in one `ResourceProfiles`, there are two profiles:
 `gpu/nanoseconds`, so Pyroscope names them `gpu`. The type IDs are
 `gpu:gpu_time:nanoseconds:gpu:nanoseconds` and
 `gpu:kernel_launches:count:gpu:nanoseconds`. The stack is
-`cuda:<device> > <demangled kernel name>`. The launching span is the sample's
+`cuda:<device> > <kernel>`. The kernel name is demangled and shortened:
+inside template arguments namespaces are dropped, lambdas print as `{lambda}`,
+and if the name is still over 160 characters, arguments are elided as `<…>`
+from the deepest level up. Demangled PyTorch kernels reach thousands of
+characters, but the op is usually a type in the arguments (`GeluCUDAKernelImpl`,
+`DivFunctor`), so dropping all template arguments would merge every elementwise
+op into one frame. The launching span is the sample's
 `Link`, which Pyroscope turns into `span_id`/`trace_id` labels for
 traces-to-profiles. Grafana offers "Profiles for this span" only on spans with
 the attribute `pyroscope.profile.id`, so the Python bridge sets it to the span
