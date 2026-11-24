@@ -1,0 +1,19 @@
+[package]
+name = "warpspan-otel"
+version = "0.1.0"
+edition = "2024"
+rust-version = "1.85"
+description = "Links CUDA kernels to the current OpenTelemetry span for warpspan (tracing layer)"
+publish = false
+
+[dependencies]
+libc = "0.2"
+# Must resolve to the same opentelemetry crate as the app's tracing-opentelemetry:
+# semver-incompatible versions each have their own Context::current().
+opentelemetry = { version = "0.33", default-features = false, features = ["trace"] }
+tracing = { version = "0.1", default-features = false, features = ["std"] }
+tracing-subscriber = { version = "0.3", default-features = false, features = ["registry", "std"] }
+
+[dev-dependencies]
+opentelemetry_sdk = { version = "0.33", features = ["testing", "trace"] }
+tracing-opentelemetry = "0.34"

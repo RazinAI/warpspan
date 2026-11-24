@@ -27,3 +27,4 @@ __pycache__/
 deploy/run/
 bridge/cpp/bridge_test
 bridge/java/build/
+bridge/rust/target/

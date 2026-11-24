@@ -25,6 +25,7 @@ variables set at process start.
 | `bridge/cpp/` | the same for OpenTelemetry C++ (header-only) |
 | `bridge/go/` | the same for Go programs that launch CUDA work through cgo |
 | `bridge/java/` | the same for OpenTelemetry Java (Java 22+) |
+| `bridge/rust/` | the same for Rust services using `tracing` + `tracing-opentelemetry` |
 | `agent/`, `cmd/warpspan/` | node agent: aggregates per process/span/kernel, exports OTLP profiles |
 | `tools/profiles-dump/` | tiny OTLP profiles receiver that prints what it gets |
 | `deploy/` | docker-compose backend (Collector, Pyroscope, Tempo, Grafana), Kubernetes manifests |
@@ -110,6 +111,16 @@ with the API and SDK used directly; under the OpenTelemetry Java agent, which
 manages context storage itself, `install()` may return true without the bridge
 seeing any spans.
 
+For Rust services that use `tracing` with `tracing-opentelemetry`, add the layer
+from `warpspan_otel::layer()` to the subscriber after the OpenTelemetry layer
+(path dependency on `bridge/rust`; the crate docs show how to skip it when
+warpspan isn't in use). It publishes the span on every span enter and exit,
+which includes each poll of an instrumented future. It needs the OpenTelemetry
+layer's context activation (the default) and the same `opentelemetry` version
+(0.33) as `tracing-opentelemetry`. Getting either wrong links nothing; the layer
+prints one warning if it sees no OpenTelemetry span in its first 10,000 enters.
+Work moved to `spawn_blocking`, rayon or un-instrumented tasks isn't linked.
+
 What to look for:
 
 - On stderr the app prints `warpspan: loaded …`, `warpspan: connected to agent …`,
@@ -164,7 +175,8 @@ Tested with Collector 0.165.0 and Pyroscope 2.4.4.
 ## Limitations
 
 - Only kernels: no memcpy/memset, no CPU or Python stacks.
-- Span linking works per thread and needs a span bridge (Python, C++, Go and Java so far).
+- Span linking works per thread and needs a span bridge (Python, C++, Go, Java
+  and Rust so far).
   asyncio, and kernels launched from other threads (e.g. autograd backward), end
   up unlinked or attributed to the last span on that thread. See ADR 0002.
 - Records are dropped rather than slowing the app: on CUPTI buffer overflow and
@@ -181,5 +193,6 @@ Tested with Collector 0.165.0 and Pyroscope 2.4.4.
 make test   # Go tests + Python bridge tests (pip install opentelemetry-sdk pytest)
             # + Go bridge tests, + C++ bridge tests if OTEL_CPP points at
             #   opentelemetry-cpp sources, + Java bridge tests if MAVEN_JARS
-            #   holds the OpenTelemetry jars (see bridge/java/Makefile)
+            #   holds the OpenTelemetry jars (see bridge/java/Makefile),
+            #   + Rust bridge tests if cargo is installed
 ```

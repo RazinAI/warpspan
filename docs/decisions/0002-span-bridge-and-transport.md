@@ -52,6 +52,17 @@ untested under the OpenTelemetry Java agent, which manages context storage
 itself, so there a true return doesn't prove that spans are published. Virtual
 threads are not supported: they move between OS threads.
 
+The Rust bridge targets `tracing` with `tracing-opentelemetry`, which is how
+most Rust services use OpenTelemetry. The bridge is a `tracing` layer: on every
+span enter and exit it reads `opentelemetry::Context::current()`, which the
+OpenTelemetry layer (with its default context activation) has just set, so it
+must come after that layer. Instrumented futures enter their span on every
+poll, so unlike asyncio in Python they are attributed per poll; work moved to
+`spawn_blocking`, rayon or un-instrumented tasks is not. Plain
+`opentelemetry::Context::attach` without a `tracing` span isn't seen.
+opentelemetry 0.33 has an experimental context observer that would cover it,
+but it is experimental and allows one global observer, so it isn't used yet.
+
 At runtime each bridge only uses its language's OTel API, never the SDK (the
 SDK is a test dependency only). The app
 keeps whatever SDK it configures.

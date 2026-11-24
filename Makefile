@@ -29,11 +29,15 @@ test: capture
 	@if [ -f "$(MAVEN_JARS)/opentelemetry-api-$(OTEL_JAVA_VERSION).jar" ]; then \
 	$(MAKE) -C bridge/java test MAVEN_JARS="$(MAVEN_JARS)" OTEL_VERSION=$(OTEL_JAVA_VERSION); \
 	else echo "skipping Java bridge test: no opentelemetry-api-$(OTEL_JAVA_VERSION).jar in MAVEN_JARS=$(MAVEN_JARS)"; fi
+	@if command -v cargo >/dev/null; then cd bridge/rust && cargo test -q --locked && \
+	{ if cargo clippy --version >/dev/null 2>&1; then cargo clippy -q --locked --all-targets -- -D warnings; fi; }; \
+	else echo "skipping Rust bridge test: cargo not on PATH (rustup installs it in ~/.cargo/bin)"; fi
 
 clean:
 	$(MAKE) -C capture clean
 	$(MAKE) -C bridge/cpp clean
 	$(MAKE) -C bridge/java clean
+	if command -v cargo >/dev/null; then cd bridge/rust && cargo clean -q; fi
 	rm -rf bin
 
 .PHONY: all capture agent test clean
