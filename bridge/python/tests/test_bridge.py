@@ -60,6 +60,18 @@ def test_current_span_gets_profile_id_for_grafana():
     assert "pyroscope.profile.id" not in background.attributes
 
 
+def test_profile_id_is_set_once_per_span(monkeypatch):
+    span = tracer.start_span("reattached")
+    calls = []
+    original = span.set_attribute
+    monkeypatch.setattr(span, "set_attribute", lambda k, v: (calls.append(k), original(k, v)))
+    for _ in range(3):
+        with trace.use_span(span):
+            pass
+    span.end()
+    assert calls == ["pyroscope.profile.id"]
+
+
 def test_unsampled_and_remote_spans_are_not_published():
     unsampled = TracerProvider(sampler=ALWAYS_OFF).get_tracer("test")
     with unsampled.start_as_current_span("dropped"):

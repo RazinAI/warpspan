@@ -25,6 +25,17 @@ why the entry point exists. The bridge loads the library with `ctypes.PyDLL`
 from `CUDA_INJECTION64_PATH`; `dlopen` returns the copy CUDA loaded, so both
 share one thread-local.
 
+The C++ bridge (`bridge/cpp`, header-only) does the same through the
+OpenTelemetry C++ API: `Install()` sets a `RuntimeContextStorage` that wraps the
+default thread-local storage and publishes after each `Attach` / `Detach`. The
+API only allows replacing the storage at startup, before other threads use
+it, so the app has to call `Install()` there; C++ has no equivalent of
+`sitecustomize`. Both bridges set `pyroscope.profile.id` once per span and
+thread, since `SetAttribute` takes a lock in the SDKs.
+
+Each bridge only depends on its language's OTel API, never the SDK. The app
+keeps whatever SDK it configures.
+
 **Alternatives:** CUPTI external correlation (push/pop per span, but it needs
 CUPTI loaded before the bridge runs, and still needs a span→trace map); NVTX
 ranges (string-based and slower, and NVTX can be disabled by the app). Either

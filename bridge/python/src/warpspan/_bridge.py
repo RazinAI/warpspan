@@ -37,6 +37,9 @@ _ABI_VERSION = 1
 _PROFILE_ID_ATTR = "pyroscope.profile.id"
 
 _lock = threading.Lock()
+# Span ID last tagged on each thread: set_attribute takes a lock in the SDK, and
+# the same span is re-attached whenever only other context values change.
+_tagged = threading.local()
 _lib: ctypes.PyDLL | None = None
 _wrapper: _WarpspanRuntimeContext | None = None
 
@@ -82,8 +85,9 @@ class _WarpspanRuntimeContext(_RuntimeContext):
             sc = span.get_span_context()
             if sc.is_valid and sc.trace_flags.sampled and not sc.is_remote:
                 self._set_span(sc.trace_id.to_bytes(16, "big"), sc.span_id.to_bytes(8, "big"))
-                if tag and span.is_recording():
+                if tag and getattr(_tagged, "span_id", 0) != sc.span_id and span.is_recording():
                     span.set_attribute(_PROFILE_ID_ATTR, format(sc.span_id, "016x"))
+                    _tagged.span_id = sc.span_id
             else:
                 self._set_span(None, None)
         except Exception:  # never break the app's tracing

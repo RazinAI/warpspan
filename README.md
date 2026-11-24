@@ -21,7 +21,8 @@ variables set at process start.
 | Path | What |
 |---|---|
 | `capture/` | `libwarpspan.so`, loaded by CUDA via `CUDA_INJECTION64_PATH` (CUPTI Callback + Activity API) |
-| `bridge/python/` | publishes the active OTel span to the library |
+| `bridge/python/` | publishes the active OTel span to the library (Python) |
+| `bridge/cpp/` | the same for OpenTelemetry C++ (header-only) |
 | `agent/`, `cmd/warpspan/` | node agent: aggregates per process/span/kernel, exports OTLP profiles |
 | `tools/profiles-dump/` | tiny OTLP profiles receiver that prints what it gets |
 | `deploy/` | docker-compose backend (Collector, Pyroscope, Tempo, Grafana), Kubernetes manifests |
@@ -83,6 +84,12 @@ setting `PYTHONPATH` (`pip install ./bridge/python`). `opentelemetry-instrument`
 puts its own `sitecustomize` first, and that one doesn't chain to ours, so the
 bridge loads through its `opentelemetry_pre_instrument` entry point instead.
 
+For a C++ app using OpenTelemetry C++, include
+`bridge/cpp/include/warpspan/otel_bridge.h` and call
+`warpspan::otel::Install()` at startup, before other threads use OpenTelemetry.
+It loads the library from `CUDA_INJECTION64_PATH` and does nothing (returns
+false) when that's unset. Link with `-ldl` on glibc older than 2.34.
+
 What to look for:
 
 - On stderr the app prints `warpspan: loaded …`, `warpspan: connected to agent …`,
@@ -137,7 +144,7 @@ Tested with Collector 0.165.0 and Pyroscope 2.4.4.
 ## Limitations
 
 - Only kernels: no memcpy/memset, no CPU or Python stacks.
-- Span linking works per thread and needs a span bridge (Python only so far).
+- Span linking works per thread and needs a span bridge (Python and C++ so far).
   asyncio, and kernels launched from other threads (e.g. autograd backward), end
   up unlinked or attributed to the last span on that thread. See ADR 0002.
 - Records are dropped rather than slowing the app: on CUPTI buffer overflow and
@@ -152,4 +159,5 @@ Tested with Collector 0.165.0 and Pyroscope 2.4.4.
 
 ```sh
 make test   # Go tests + Python bridge tests (pip install opentelemetry-sdk pytest)
+            # + C++ bridge tests if OTEL_CPP points at opentelemetry-cpp sources
 ```
