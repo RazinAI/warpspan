@@ -51,6 +51,12 @@ def test_tracks_nested_spans():
     assert _current_span() is None
 
 
+def test_current_span_gets_profile_id_for_grafana():
+    with tracer.start_as_current_span("outer") as outer:
+        tracer.start_span("background").end()
+    assert outer.attributes["pyroscope.profile.id"] == format(ids(outer)[1], "016x")
+
+
 def test_span_not_made_current_is_ignored():
     with tracer.start_as_current_span("current") as current:
         tracer.start_span("background").end()  # started but never attached

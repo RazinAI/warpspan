@@ -36,13 +36,12 @@ Pyroscope 2.4.4, Tempo 2.10, Grafana 13.3):
 
 - PyTorch example (`examples/torch-spans`): all 130 kernels of 10 requests
   were linked to the right child span (preprocess / forward / postprocess).
-- Taking a span ID from the trace in Tempo and asking Pyroscope for that span's
-  profile returns exactly the kernels that span ran. This is the query behind
-  Grafana's traces-to-profiles; the button itself hasn't been clicked through.
+- In Grafana, opening the trace in Tempo, clicking a span and then "Profiles
+  for this span" shows a flame graph of exactly the kernels that span ran.
 - The bridge also loads under `opentelemetry-instrument`.
-- The inject image (CUDA 12.6 build) loads its bundled libcupti inside a plain
-  CUDA runtime image. It hasn't been run on a GPU there (no NVIDIA container
-  toolkit on the test machine).
+- The inject image's CUDA 12.6 build (with its bundled libcupti) ran the same
+  PyTorch example on the GPU, copied out to the host. It hasn't run inside a
+  GPU container (no NVIDIA container toolkit on the test machine).
 
 ## Build
 
@@ -95,6 +94,9 @@ What to look for:
 - In Pyroscope or Grafana: profile type `gpu` → `gpu_time`, service
   `torch-spans-example`. A freshly started Pyroscope can take about a minute
   before data becomes queryable.
+- In Grafana's trace view, spans have a "Profiles for this span" button. Grafana
+  shows it only for spans with the `pyroscope.profile.id` attribute, which the
+  bridge sets (to the span ID) on every span that becomes current.
 
 Without any agent, `WARPSPAN_DEBUG_FILE=/tmp/kernels.log` (`-` for stderr)
 writes one line per kernel, including trace/span IDs.

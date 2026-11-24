@@ -7,6 +7,10 @@ each attach/detach we read the span now current on this thread and call
 ``warpspan_set_span(trace_id, span_id)`` in libwarpspan.so, which keeps it in a
 thread-local that the CUPTI launch callback reads.
 
+When a span becomes current it also gets the attribute ``pyroscope.profile.id``
+(its span ID in hex). Grafana shows "Profiles for this span" only on spans that
+have it, and queries Pyroscope for that span ID.
+
 Known limitation: asyncio tasks switch context without attach/detach, so with
 many concurrent requests on one event-loop thread a kernel can be attributed to
 the span attached last on that thread.
@@ -26,6 +30,7 @@ from opentelemetry.context.context import _RuntimeContext
 _log = logging.getLogger("warpspan")
 
 _ABI_VERSION = 1
+_PROFILE_ID_ATTR = "pyroscope.profile.id"
 
 _lock = threading.Lock()
 _lib: ctypes.PyDLL | None = None
@@ -57,7 +62,7 @@ class _WarpspanRuntimeContext(_RuntimeContext):
 
     def attach(self, context: Any) -> Any:
         token = self._inner.attach(context)
-        self._publish(context)
+        self._publish(context, tag=True)
         return token
 
     def get_current(self) -> Any:
@@ -67,11 +72,14 @@ class _WarpspanRuntimeContext(_RuntimeContext):
         self._inner.detach(token)
         self._publish(self._inner.get_current())
 
-    def _publish(self, context: Any) -> None:
+    def _publish(self, context: Any, tag: bool = False) -> None:
         try:
-            sc = trace.get_current_span(context).get_span_context()
+            span = trace.get_current_span(context)
+            sc = span.get_span_context()
             if sc.is_valid:
                 self._set_span(sc.trace_id.to_bytes(16, "big"), sc.span_id.to_bytes(8, "big"))
+                if tag and span.is_recording():
+                    span.set_attribute(_PROFILE_ID_ATTR, format(sc.span_id, "016x"))
             else:
                 self._set_span(None, None)
         except Exception:  # never break the app's tracing

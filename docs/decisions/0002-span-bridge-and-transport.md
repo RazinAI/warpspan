@@ -68,7 +68,10 @@ Per process, in one `ResourceProfiles`, there are two profiles:
 `gpu:kernel_launches:count:gpu:nanoseconds`. The stack is
 `cuda:<device> > <demangled kernel name>`. The launching span is the sample's
 `Link`, which Pyroscope turns into `span_id`/`trace_id` labels for
-traces-to-profiles.
+traces-to-profiles. Grafana offers "Profiles for this span" only on spans with
+the attribute `pyroscope.profile.id`, so the Python bridge sets it to the span
+ID (hex) when a span becomes current. Spans that launched no kernels still get
+it and show an empty profile.
 
 `service.name` follows the OTel SDK rules from the process's own
 `OTEL_SERVICE_NAME`/`OTEL_RESOURCE_ATTRIBUTES`, so profiles and traces land in
@@ -83,7 +86,7 @@ own request.
   CPU stacks at launch is future work and has to stay cheap.
 - Pinned, tested combination: OTLP profiles proto v0.4.1 (wire-identical to
   v0.3.0), Collector v0.165 with `--feature-gates=service.profilesSupport`,
-  Pyroscope v2.4.4. Verified locally with PyTorch: Pyroscope's span-profile
-  query, given a span ID from Tempo, returns that span's kernels.
+  Pyroscope v2.4.4, Grafana 13.3. Verified locally with PyTorch: Grafana's
+  "Profiles for this span" on a Tempo span shows that span's kernels.
 - Pyroscope 2.4.4 keeps `service_name` as a series label but did not keep the
   other resource attributes (`host.name`, `process.pid`) in that test.
