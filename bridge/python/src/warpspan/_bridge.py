@@ -7,6 +7,10 @@ each attach/detach we read the span now current on this thread and call
 ``warpspan_set_span(trace_id, span_id)`` in libwarpspan.so, which keeps it in a
 thread-local that the CUPTI launch callback reads.
 
+Only sampled, local spans are published. Unsampled spans never reach the trace
+backend, and a remote parent belongs to another service, so linking kernels to
+them would only add span IDs nobody can look up.
+
 When a span becomes current it also gets the attribute ``pyroscope.profile.id``
 (its span ID in hex). Grafana shows "Profiles for this span" only on spans that
 have it, and queries Pyroscope for that span ID.
@@ -76,7 +80,7 @@ class _WarpspanRuntimeContext(_RuntimeContext):
         try:
             span = trace.get_current_span(context)
             sc = span.get_span_context()
-            if sc.is_valid:
+            if sc.is_valid and sc.trace_flags.sampled and not sc.is_remote:
                 self._set_span(sc.trace_id.to_bytes(16, "big"), sc.span_id.to_bytes(8, "big"))
                 if tag and span.is_recording():
                     span.set_attribute(_PROFILE_ID_ATTR, format(sc.span_id, "016x"))

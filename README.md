@@ -140,8 +140,9 @@ Tested with Collector 0.165.0 and Pyroscope 2.4.4.
 - Span linking works per thread and needs a span bridge (Python only so far).
   asyncio, and kernels launched from other threads (e.g. autograd backward), end
   up unlinked or attributed to the last span on that thread. See ADR 0002.
-- Records are dropped rather than slowing the app: on CUPTI buffer overflow,
-  when the agent is busy, and when more than 131k launches happen between flushes.
+- Records are dropped rather than slowing the app: on CUPTI buffer overflow and
+  when the agent is busy. If more than 131k launches happen between flushes, the
+  oldest are still counted but lose their span.
 - CUPTI allows one subscriber per process. Nsight Systems or `torch.profiler`
   may fail to attach while warpspan is active; use `WARPSPAN_DISABLE=1` for those runs.
 - A process that `fork()`s after CUDA initialisation isn't profiled in the child.

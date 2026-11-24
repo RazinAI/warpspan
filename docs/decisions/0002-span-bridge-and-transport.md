@@ -81,10 +81,16 @@ it and show an empty profile.
 
 `service.name` follows the OTel SDK rules from the process's own
 `OTEL_SERVICE_NAME`/`OTEL_RESOURCE_ATTRIBUTES`, so profiles and traces land in
-the same service. To bound memory and request size, the agent keeps at most
-20,000 distinct (kernel, device, span) samples per process per interval. Beyond
-that, kernels are counted without their span. Each process is exported in its
-own request.
+the same service. The agent keeps at most 20,000 distinct (kernel, device,
+span) samples per process per interval. Beyond that, kernels are counted
+without their span, and past 22,000 keys under `[other kernels]`. Together with
+the 2 KiB name limit, the 1024-connection limit and the bounded name shortening,
+this caps what one process (or a hostile client) can make the agent hold. Each
+process is exported in its own request.
+
+The Python bridge publishes only sampled, local spans. Kernels of unsampled
+requests are counted without a span, because their span IDs never reach the
+trace backend.
 
 ## Consequences
 

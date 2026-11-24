@@ -16,6 +16,7 @@ from pathlib import Path
 import pytest
 from opentelemetry import trace
 from opentelemetry.sdk.trace import TracerProvider
+from opentelemetry.sdk.trace.sampling import ALWAYS_OFF
 
 import warpspan
 from warpspan._bridge import _current_span, _uninstall
@@ -53,8 +54,22 @@ def test_tracks_nested_spans():
 
 def test_current_span_gets_profile_id_for_grafana():
     with tracer.start_as_current_span("outer") as outer:
-        tracer.start_span("background").end()
+        background = tracer.start_span("background")  # never made current
+        background.end()
     assert outer.attributes["pyroscope.profile.id"] == format(ids(outer)[1], "016x")
+    assert "pyroscope.profile.id" not in background.attributes
+
+
+def test_unsampled_and_remote_spans_are_not_published():
+    unsampled = TracerProvider(sampler=ALWAYS_OFF).get_tracer("test")
+    with unsampled.start_as_current_span("dropped"):
+        assert _current_span() is None
+
+    remote = trace.SpanContext(
+        trace_id=1, span_id=2, is_remote=True, trace_flags=trace.TraceFlags(trace.TraceFlags.SAMPLED)
+    )
+    with trace.use_span(trace.NonRecordingSpan(remote)):
+        assert _current_span() is None
 
 
 def test_span_not_made_current_is_ignored():

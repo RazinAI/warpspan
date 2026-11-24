@@ -16,7 +16,10 @@
 //
 // This code runs inside other people's processes: no exceptions, no allocation
 // or locks on the launch path, no getenv() after initialisation (it races with
-// the app's setenv()), logging only to stderr.
+// the app's setenv()), logging only to stderr. One exception: the library is
+// dlopen()ed, so glibc allocates its thread_local block lazily, on a thread's
+// first launch or span change. -ftls-model=initial-exec would avoid that, but
+// dlopen() then fails when the static TLS reserve is used up.
 
 #include "include/warpspan.h"
 #include "protocol.h"
@@ -217,10 +220,10 @@ void close_socket_locked() {
 
 bool send_locked(const Bytes &msg) {
   if (g->fd < 0) return false;
-  ssize_t n = send(g->fd, msg.buf.data(), msg.buf.size(), MSG_DONTWAIT | MSG_NOSIGNAL);
-  if (n == static_cast<ssize_t>(msg.buf.size())) return true;
-  if (n < 0 && (errno == EAGAIN || errno == EWOULDBLOCK)) return false;  // agent busy: drop
-  log("lost connection to agent (%s), will reconnect", n < 0 ? std::strerror(errno) : "short write");
+  // SOCK_SEQPACKET sends the whole message or fails.
+  if (send(g->fd, msg.buf.data(), msg.buf.size(), MSG_DONTWAIT | MSG_NOSIGNAL) >= 0) return true;
+  if (errno == EAGAIN || errno == EWOULDBLOCK) return false;  // agent busy: drop
+  log("lost connection to agent (%s), will reconnect", std::strerror(errno));
   close_socket_locked();
   return false;
 }
@@ -380,6 +383,7 @@ void CUPTIAPI on_buffer_completed(CUcontext ctx, uint32_t stream_id, uint8_t *bu
 
 void flush_activity(uint32_t flags) {
   std::lock_guard<std::mutex> lock(g->flush_mu);
+  if (g->disabled.load(std::memory_order_relaxed)) return;  // exiting: CUDA may be torn down
   cuptiActivityFlushAll(flags);
 }
 
@@ -461,7 +465,13 @@ void on_exit() {
     std::lock_guard<std::mutex> lock(g->out_mu);
     connect_locked();
   }
-  flush_activity(CUPTI_ACTIVITY_FLAG_FLUSH_FORCED);
+  {
+    // Last flush; then stop the flush thread from calling CUPTI while CUDA's
+    // own exit handlers and destructors run.
+    std::lock_guard<std::mutex> lock(g->flush_mu);
+    cuptiActivityFlushAll(CUPTI_ACTIVITY_FLAG_FLUSH_FORCED);
+    g->disabled.store(true);
+  }
   log("exiting: %llu kernels, %llu linked to spans, %llu dropped, %llu not sent (no agent)",
       static_cast<unsigned long long>(g->kernels.load()), static_cast<unsigned long long>(g->kernels_linked.load()),
       static_cast<unsigned long long>(g->dropped.load()), static_cast<unsigned long long>(g->unsent.load()));
