@@ -17,6 +17,7 @@ const (
 	KernelsFixedSize        = 16
 	KernelRecordSize        = 48
 	MaxMessage              = 60 * 1024
+	MaxNameLen              = 2048 // the capture library truncates kernel names to this
 )
 
 // Message types.
@@ -85,14 +86,20 @@ func Decode(msg []byte) (any, error) {
 		return nil, fmt.Errorf("wire: payload length %d, header says %d", len(payload), n)
 	}
 	r := reader{b: payload}
+	var m any
+	var err error
 	switch typ {
 	case TypeHello:
-		return decodeHello(&r, pid)
+		m, err = decodeHello(&r, pid)
 	case TypeKernels:
-		return decodeKernels(&r, pid)
+		m, err = decodeKernels(&r, pid)
 	default:
 		return nil, fmt.Errorf("wire: unknown message type %d", typ)
 	}
+	if err == nil && len(r.b) != 0 {
+		return nil, fmt.Errorf("wire: %d trailing bytes", len(r.b))
+	}
+	return m, err
 }
 
 func decodeHello(r *reader, pid uint32) (*Hello, error) {
@@ -120,7 +127,11 @@ func decodeKernels(r *reader, pid uint32) (*Kernels, error) {
 	}
 	names := make([]string, 0, nstrings)
 	for i := 0; i < nstrings && r.err == nil; i++ {
-		names = append(names, r.str16())
+		name := r.str16()
+		if len(name) > MaxNameLen {
+			return nil, fmt.Errorf("wire: kernel name of %d bytes exceeds %d", len(name), MaxNameLen)
+		}
+		names = append(names, name)
 	}
 	k.Records = make([]Kernel, 0, nrecords)
 	for i := 0; i < nrecords && r.err == nil; i++ {

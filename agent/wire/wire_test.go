@@ -3,6 +3,7 @@ package wire
 import (
 	"encoding/binary"
 	"reflect"
+	"strings"
 	"testing"
 )
 
@@ -54,6 +55,9 @@ func TestDecodeErrors(t *testing.T) {
 	}
 	hugeCount := append([]byte(nil), valid...)
 	binary.LittleEndian.PutUint32(hugeCount[HeaderSize+8:], 0xFFFFFFFF) // string_count
+	trailing := append(append([]byte(nil), valid...), 0)
+	binary.LittleEndian.PutUint32(trailing[8:], uint32(len(trailing)-HeaderSize)) // payload_len
+	longName := EncodeKernels(&Kernels{Records: []Kernel{{Name: strings.Repeat("k", MaxNameLen+1)}}})
 
 	tests := []struct {
 		name string
@@ -67,6 +71,8 @@ func TestDecodeErrors(t *testing.T) {
 		{"name index out of range", corrupt(HeaderSize+KernelsFixedSize+3+40, 9)},
 		{"huge string count", hugeCount},
 		{"too large", make([]byte, MaxMessage+1)},
+		{"trailing bytes", trailing},
+		{"kernel name too long", longName},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {

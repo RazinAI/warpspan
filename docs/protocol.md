@@ -37,7 +37,9 @@ The agent derives the OTel resource (`service.name` etc.) from these.
 
 ## Kernels (type 2)
 
-A batch of completed kernel executions. Kernel names (mangled) are interned per message.
+A batch of completed kernel executions. Kernel names (mangled, at most 2048
+bytes; the library truncates longer ones) are interned per message. A message
+with bytes after the last record is rejected.
 
 ```
 u64 dropped_total     process lifetime total of records lost (CUPTI overflow, agent busy)
@@ -64,5 +66,7 @@ Unix-epoch nanoseconds, but this has not been verified across driver versions.
 The socket is world-writable so that apps running as any user can connect. Any
 local process (or any pod mounting the socket directory) can therefore send
 records under any `service.name` or trace ID. The agent validates message
-structure and sizes, but not where the data came from. Treat the profiles as
+structure and sizes and limits what a client can make it hold: kernel names up
+to 2048 bytes, a cap on samples per process per interval, at most 1024
+connections. It does not check where the data came from. Treat the profiles as
 being as trustworthy as the workloads on the node.

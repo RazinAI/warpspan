@@ -12,6 +12,7 @@ import (
 	"os"
 	"path/filepath"
 	"sync"
+	"sync/atomic"
 	"syscall"
 
 	"github.com/zraisan/warpspan/agent/collect"
@@ -44,12 +45,17 @@ func Listen(path string) (*net.UnixListener, error) {
 	return l, nil
 }
 
+// MaxConns limits concurrent connections; each holds a goroutine and a
+// MaxMessage-sized buffer.
+const MaxConns = 1024
+
 // Server reads from connected capture libraries.
 type Server struct {
 	Collector *collect.Collector
 	Log       *slog.Logger
 
 	nextID uint64 // only used by the accept loop
+	conns  atomic.Int64
 	wg     sync.WaitGroup
 }
 
@@ -66,11 +72,18 @@ func (s *Server) Serve(ctx context.Context, l *net.UnixListener) error {
 			}
 			return err
 		}
+		if s.conns.Load() >= MaxConns {
+			s.Log.Warn("too many connections; rejecting", "max", MaxConns)
+			conn.Close()
+			continue
+		}
 		s.nextID++
 		id := s.nextID
+		s.conns.Add(1)
 		s.wg.Add(1)
 		go func() {
 			defer s.wg.Done()
+			defer s.conns.Add(-1)
 			s.handle(ctx, id, conn)
 		}()
 	}
@@ -107,6 +120,10 @@ func (s *Server) handle(ctx context.Context, id uint64, conn *net.UnixConn) {
 		}
 		switch m := msg.(type) {
 		case *wire.Hello:
+			if proc != nil {
+				log.Warn("second hello; closing connection")
+				return
+			}
 			proc = s.Collector.Hello(id, m)
 			log.Info("process connected", "pid", m.PID, "service.name", proc.Resource[0].Value)
 		case *wire.Kernels:

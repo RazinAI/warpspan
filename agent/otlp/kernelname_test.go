@@ -1,8 +1,10 @@
 package otlp
 
 import (
+	"fmt"
 	"strings"
 	"testing"
+	"time"
 )
 
 // Mangled names are real kernels recorded from PyTorch 2.15 (cu132).
@@ -72,6 +74,35 @@ func TestKernelFrame(t *testing.T) {
 				t.Errorf("frame longer than %d: %d", maxKernelFrame, len(got))
 			}
 		})
+	}
+}
+
+// blowupName mangles f<A<int>, A<A<int> × w>, ...>: each level repeats the
+// previous one w times through substitutions, so the demangled length grows as
+// w^levels while the mangled name stays short.
+func blowupName(levels, w int) string {
+	var b strings.Builder
+	b.WriteString("_Z1fI1AIiE") // substitutions: f=S_, A=S0_, A<int>=S1_
+	for k := 1; k <= levels; k++ {
+		b.WriteString("S0_I")
+		for range w {
+			fmt.Fprintf(&b, "S%d_", k)
+		}
+		b.WriteString("E")
+	}
+	b.WriteString("Evv")
+	return b.String()
+}
+
+func TestKernelFrameExponentialName(t *testing.T) {
+	name := blowupName(9, 14) // ~440 bytes, demangles to ~10^10 characters
+	start := time.Now()
+	got := kernelFrame(name)
+	if d := time.Since(start); d > time.Second {
+		t.Errorf("took %v", d)
+	}
+	if len(got) > printBudget+len("…") {
+		t.Errorf("frame of %d bytes: %.80s…", len(got), got)
 	}
 }
 

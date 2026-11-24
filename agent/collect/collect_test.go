@@ -1,6 +1,7 @@
 package collect
 
 import (
+	"fmt"
 	"reflect"
 	"testing"
 	"time"
@@ -103,5 +104,19 @@ func TestCollectorCapsKeys(t *testing.T) {
 	p := c.Snapshot(time.Now()).Processes[0]
 	if len(p.Samples) != MaxKeysPerProcess+1 || p.Unlinked != 10 || p.Samples[Key{Name: "k"}].Count != 10 {
 		t.Fatalf("samples=%d unlinked=%d", len(p.Samples), p.Unlinked)
+	}
+}
+
+func TestCollectorCapsUnlinkedNames(t *testing.T) {
+	c := New(nil)
+	c.Hello(1, &wire.Hello{PID: 1})
+	recs := make([]wire.Kernel, maxKeysHard+10)
+	for i := range recs {
+		recs[i] = wire.Kernel{Name: fmt.Sprintf("k%d", i), EndNs: 1}
+	}
+	c.Add(1, &wire.Kernels{Records: recs})
+	p := c.Snapshot(time.Now()).Processes[0]
+	if len(p.Samples) != maxKeysHard+1 || p.Samples[Key{Name: OtherKernels}].Count != 10 {
+		t.Fatalf("samples=%d other=%d", len(p.Samples), p.Samples[Key{Name: OtherKernels}].Count)
 	}
 }

@@ -59,7 +59,7 @@ func main() {
 	headers := headerFlag{}
 	if v := envOr("", "OTEL_EXPORTER_OTLP_PROFILES_HEADERS", "OTEL_EXPORTER_OTLP_HEADERS"); v != "" {
 		if err := headers.Set(v); err != nil {
-			log.Error("invalid OTEL_EXPORTER_OTLP_HEADERS", "err", err)
+			log.Error("invalid OTEL_EXPORTER_OTLP_(PROFILES_)HEADERS", "err", err)
 			os.Exit(2)
 		}
 	}
@@ -111,27 +111,39 @@ func main() {
 	opts := otlp.Options{ScopeVersion: version}
 	ticker := time.NewTicker(*interval)
 	defer ticker.Stop()
+	// Each flush must finish within its budget so a hung Collector neither
+	// delays the next interval nor blocks shutdown past the k8s grace period.
+	flushWithin := func(budget time.Duration) {
+		fctx, cancel := context.WithTimeout(context.Background(), budget)
+		defer cancel()
+		flush(fctx, log, coll, exporter, opts)
+	}
 	for {
 		select {
 		case <-ticker.C:
-			flush(log, coll, exporter, opts)
+			flushWithin(*interval)
 		case err := <-serveErr:
 			if err != nil {
 				log.Error("server failed", "err", err)
 			}
-			flush(log, coll, exporter, opts)
+			flushWithin(shutdownFlushTimeout)
 			return
 		case <-ctx.Done():
 			log.Info("shutting down")
 			<-serveErr // wait for connections to drain
-			flush(log, coll, exporter, opts)
+			flushWithin(shutdownFlushTimeout)
 			return
 		}
 	}
 }
 
-func flush(log *slog.Logger, c *collect.Collector, exp *otlp.Exporter, opts otlp.Options) {
+const shutdownFlushTimeout = 10 * time.Second
+
+func flush(ctx context.Context, log *slog.Logger, c *collect.Collector, exp *otlp.Exporter, opts otlp.Options) {
 	snap := c.Snapshot(time.Now())
+	if len(snap.Processes) == 0 {
+		return
+	}
 	var kernels, linked, unlinkedByCap int64
 	var dropped uint64
 	for _, p := range snap.Processes {
@@ -143,9 +155,6 @@ func flush(log *slog.Logger, c *collect.Collector, exp *otlp.Exporter, opts otlp
 		}
 		dropped += p.Dropped
 		unlinkedByCap += p.Unlinked
-	}
-	if len(snap.Processes) == 0 {
-		return
 	}
 	log.Info("interval", "processes", len(snap.Processes), "kernels", kernels, "linked_to_spans", linked,
 		"dropped", dropped, "unlinked_over_cap", unlinkedByCap)
@@ -159,7 +168,7 @@ func flush(log *slog.Logger, c *collect.Collector, exp *otlp.Exporter, opts otlp
 		if req == nil {
 			continue
 		}
-		if err := exp.Export(context.Background(), req); err != nil {
+		if err := exp.Export(ctx, req); err != nil {
 			log.Error("export failed; data for this interval is dropped", "pid", p.Process.PID, "err", err)
 		}
 	}

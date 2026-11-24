@@ -9,6 +9,11 @@ import (
 // maxKernelFrame is the length kernel frames are shortened to when possible.
 const maxKernelFrame = 160
 
+// printBudget stops printing a name early. The demangled AST is a DAG
+// (substitutions share nodes), so printing it as a tree can grow
+// exponentially: a few hundred mangled bytes can expand to gigabytes.
+const printBudget = 4 * maxKernelFrame
+
 // kernelFrame turns a (usually mangled) CUDA kernel name into a readable frame.
 //
 // Fully demangled template kernels (PyTorch, CUTLASS) can be thousands of
@@ -17,7 +22,9 @@ const maxKernelFrame = 160
 // parameters are removed. If the result is still longer than maxKernelFrame,
 // template arguments are elided as <…> starting from the deepest level. The
 // interesting part (e.g. GeluCUDAKernelImpl, DivFunctor) is usually a type
-// name in the arguments, so they are kept for as long as they fit.
+// name in the arguments, so they are kept for as long as they fit. Kernels
+// whose arguments never fit merge into one frame (PyTorch's random kernels all
+// become distribution_elementwise_grid_stride_kernel<…>).
 //
 // Names that are not C++ mangled names are returned unchanged.
 func kernelFrame(name string) string {
@@ -40,6 +47,9 @@ func kernelFrame(name string) string {
 func shortName(a demangle.AST, maxDepth int) string {
 	p := namePrinter{maxDepth: maxDepth}
 	p.print(a, 0, true)
+	if p.b.Len() > printBudget {
+		return p.b.String()[:printBudget] + "…"
+	}
 	return p.b.String()
 }
 
@@ -51,6 +61,9 @@ type namePrinter struct {
 // print writes a. depth is the template nesting level; top is true for the
 // kernel's own name, which keeps its namespaces.
 func (p *namePrinter) print(a demangle.AST, depth int, top bool) {
+	if p.b.Len() > printBudget {
+		return
+	}
 	switch n := a.(type) {
 	case *demangle.Name:
 		p.b.WriteString(n.Name)
@@ -80,7 +93,7 @@ func (p *namePrinter) print(a demangle.AST, depth int, top bool) {
 		p.print(n.Base, depth, top)
 		p.b.WriteByte('*')
 	default:
-		p.b.WriteString(demangle.ASTToString(a, demangle.NoParams, demangle.NoEnclosingParams))
+		p.b.WriteString(demangle.ASTToString(a, demangle.NoParams, demangle.NoEnclosingParams, demangle.MaxLength(10)))
 	}
 }
 

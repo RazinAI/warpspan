@@ -14,9 +14,14 @@ import (
 )
 
 // MaxKeysPerProcess caps distinct (kernel, device, span) samples per process
-// per interval, which bounds memory and export size. Kernels beyond the cap are
-// kept but recorded without their span.
-const MaxKeysPerProcess = 20_000
+// per interval. Beyond it, kernels are counted without their span. Keys without
+// a span may use maxKeysHard - MaxKeysPerProcess more; after that, kernels are
+// counted under OtherKernels.
+const (
+	MaxKeysPerProcess = 20_000
+	maxKeysHard       = MaxKeysPerProcess + 2_000
+	OtherKernels      = "[other kernels]"
+)
 
 // Attr is one resource attribute.
 type Attr struct {
@@ -105,8 +110,12 @@ func (c *Collector) Add(id uint64, k *wire.Kernels) {
 		st, ok := ps.snap.Samples[key]
 		if !ok && key.Linked() && len(ps.snap.Samples) >= MaxKeysPerProcess {
 			key.TraceID, key.SpanID = [16]byte{}, [8]byte{}
-			st = ps.snap.Samples[key]
+			st, ok = ps.snap.Samples[key]
 			ps.snap.Unlinked++
+		}
+		if !ok && len(ps.snap.Samples) >= maxKeysHard {
+			key = Key{Name: OtherKernels, Device: r.Device}
+			st = ps.snap.Samples[key]
 		}
 		st.Count++
 		if r.EndNs > r.StartNs {
