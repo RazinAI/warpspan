@@ -24,6 +24,7 @@ variables set at process start.
 | `bridge/python/` | publishes the active OTel span to the library (Python) |
 | `bridge/cpp/` | the same for OpenTelemetry C++ (header-only) |
 | `bridge/go/` | the same for Go programs that launch CUDA work through cgo |
+| `bridge/java/` | the same for OpenTelemetry Java (Java 22+) |
 | `agent/`, `cmd/warpspan/` | node agent: aggregates per process/span/kernel, exports OTLP profiles |
 | `tools/profiles-dump/` | tiny OTLP profiles receiver that prints what it gets |
 | `deploy/` | docker-compose backend (Collector, Pyroscope, Tempo, Grafana), Kubernetes manifests |
@@ -99,6 +100,16 @@ call. Only launches on that thread are linked. Call `warpspan.Flush()` before
 exiting: Go skips C `atexit` handlers, so the library's own exit flush doesn't
 run.
 
+For Java (22+, it uses the foreign function API), `make -C bridge/java` builds
+`bridge/java/build/warpspan-otel.jar`; put it on the classpath next to
+`opentelemetry-api`. Call `io.github.zraisan.warpspan.Warpspan.install()` at
+startup, after any other `ContextStorage.addWrapper` and before anything uses
+OpenTelemetry; it returns false if it was too late. Run the JVM with
+`--enable-native-access=ALL-UNNAMED`. Virtual threads aren't supported. Tested
+with the API and SDK used directly; under the OpenTelemetry Java agent, which
+manages context storage itself, `install()` may return true without the bridge
+seeing any spans.
+
 What to look for:
 
 - On stderr the app prints `warpspan: loaded …`, `warpspan: connected to agent …`,
@@ -153,7 +164,7 @@ Tested with Collector 0.165.0 and Pyroscope 2.4.4.
 ## Limitations
 
 - Only kernels: no memcpy/memset, no CPU or Python stacks.
-- Span linking works per thread and needs a span bridge (Python, C++ and Go so far).
+- Span linking works per thread and needs a span bridge (Python, C++, Go and Java so far).
   asyncio, and kernels launched from other threads (e.g. autograd backward), end
   up unlinked or attributed to the last span on that thread. See ADR 0002.
 - Records are dropped rather than slowing the app: on CUPTI buffer overflow and
@@ -169,5 +180,6 @@ Tested with Collector 0.165.0 and Pyroscope 2.4.4.
 ```sh
 make test   # Go tests + Python bridge tests (pip install opentelemetry-sdk pytest)
             # + Go bridge tests, + C++ bridge tests if OTEL_CPP points at
-            #   opentelemetry-cpp sources
+            #   opentelemetry-cpp sources, + Java bridge tests if MAVEN_JARS
+            #   holds the OpenTelemetry jars (see bridge/java/Makefile)
 ```

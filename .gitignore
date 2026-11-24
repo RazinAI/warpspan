@@ -26,3 +26,4 @@ __pycache__/
 # Local agent socket dir used by deploy/docker-compose.yaml
 deploy/run/
 bridge/cpp/bridge_test
+bridge/java/build/

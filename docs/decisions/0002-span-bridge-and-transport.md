@@ -43,6 +43,15 @@ exits without running C `atexit` handlers, so the library exports
 `warpspan_flush()` (optional symbol, no ABI bump) and the bridge exposes it as
 `Flush()`.
 
+The Java bridge registers a wrapper with `ContextStorage.addWrapper` and calls
+`warpspan_set_span` through the foreign function API (Java 22+), so it needs no
+JNI library. Wrappers are only accepted before the storage is first used, so
+`install()` initialises the storage itself and returns false if its wrapper
+didn't take effect; wrappers other code adds after that are ignored. It is
+untested under the OpenTelemetry Java agent, which manages context storage
+itself, so there a true return doesn't prove that spans are published. Virtual
+threads are not supported: they move between OS threads.
+
 At runtime each bridge only uses its language's OTel API, never the SDK (the
 SDK is a test dependency only). The app
 keeps whatever SDK it configures.
