@@ -22,7 +22,7 @@ flowchart LR
 
 ### Images
 
-CI publishes both images to GHCR (private for now, like the repo):
+CI publishes both images to GHCR:
 
 | Image | Tags |
 | --- | --- |
@@ -50,10 +50,6 @@ helm install warpspan oci://ghcr.io/razinai/charts/warpspan \
   --namespace warpspan --create-namespace \
   --set otlp.endpoint=http://otel-collector.observability.svc:4317
 ```
-
-The chart is private for now: log in first with `helm registry login ghcr.io`
-(a GitHub token with `read:packages`), and give the cluster a pull secret for the
-agent image (`imagePullSecrets` in the values).
 
 The agent runs on nodes labelled `nvidia.com/gpu.present=true` (`nodeSelector` in the values), creates its socket in the host directory `/var/run/warpspan`, and adds `k8s.node.name` to every profile. Useful values:
 

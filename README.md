@@ -160,10 +160,6 @@ helm install warpspan oci://ghcr.io/razinai/charts/warpspan \
   --set otlp.endpoint=http://otel-collector.observability.svc:4317
 ```
 
-The chart is private for now: log in first with `helm registry login ghcr.io`
-(a GitHub token with `read:packages`), and give the cluster a pull secret for the
-agent image (`imagePullSecrets` in the values).
-
 GPU pods still need the init container, volumes and environment variables added
 by hand; `helm install` prints them, and
 [`deploy/kubernetes/example-gpu-pod.yaml`](deploy/kubernetes/example-gpu-pod.yaml)
