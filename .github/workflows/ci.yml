@@ -41,7 +41,7 @@ jobs:
         run: |
           out=$(git ls-files -z '*.go' ':!:cmd/learn-traces' | xargs -0 gofmt -l)
           [ -z "$out" ] || { echo "::error::run gofmt -w on:"; echo "$out"; exit 1; }
-      - uses: astral-sh/setup-uv@v10
+      - uses: astral-sh/setup-uv@v10.4.0
       - name: ruff
         working-directory: bridge/python
         run: |
@@ -76,7 +76,7 @@ jobs:
       - uses: Swatinem/rust-cache@v2
         with:
           workspaces: bridge/rust
-      - uses: astral-sh/setup-uv@v10
+      - uses: astral-sh/setup-uv@v10.4.0
 
       - name: Python environments (3.9 is the oldest supported, 3.14 has context watchers)
         run: |

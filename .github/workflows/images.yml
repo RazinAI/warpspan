@@ -242,7 +242,7 @@ jobs:
           pattern: release-*
           path: dist
           merge-multiple: true
-      - uses: astral-sh/setup-uv@v10
+      - uses: astral-sh/setup-uv@v10.4.0
       - name: Python wheel
         run: uv build --wheel --out-dir dist bridge/python
       - name: Checksums
