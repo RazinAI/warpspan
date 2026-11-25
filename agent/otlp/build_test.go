@@ -14,7 +14,7 @@ import (
 	"google.golang.org/grpc/metadata"
 	"google.golang.org/protobuf/proto"
 
-	"github.com/zraisan/warpspan/agent/collect"
+	"github.com/RazinAI/warpspan/agent/collect"
 )
 
 const torchKernel = "_ZN2at6native29vectorized_elementwise_kernelILi4ENS0_15CUDAFunctor_addIfEESt5arrayIPcLm3EEEEviT0_T1_"

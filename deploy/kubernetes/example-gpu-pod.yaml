@@ -25,7 +25,7 @@ spec:
         type: DirectoryOrCreate
   initContainers:
     - name: warpspan-init
-      image: ghcr.io/zraisan/warpspan-inject:0.1.0
+      image: ghcr.io/razinai/warpspan-inject:0.1.0
       volumeMounts:
         - name: warpspan
           mountPath: /target

@@ -1,4 +1,4 @@
-module github.com/zraisan/warpspan
+module github.com/RazinAI/warpspan
 
 go 1.26.0
 

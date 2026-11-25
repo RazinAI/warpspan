@@ -9,8 +9,8 @@ import (
 	"testing"
 	"time"
 
-	"github.com/zraisan/warpspan/agent/collect"
-	"github.com/zraisan/warpspan/agent/wire"
+	"github.com/RazinAI/warpspan/agent/collect"
+	"github.com/RazinAI/warpspan/agent/wire"
 )
 
 func TestServerReceivesKernels(t *testing.T) {

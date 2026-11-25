@@ -1,4 +1,4 @@
-module github.com/zraisan/warpspan/bridge/go
+module github.com/RazinAI/warpspan/bridge/go
 
 go 1.26.0
 

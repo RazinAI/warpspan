@@ -12,7 +12,7 @@ make -C bridge/java   # builds bridge/java/build/warpspan-otel.jar
 Put the jar on the classpath next to `opentelemetry-api`, and call `install()` at startup:
 
 ```java
-import io.github.zraisan.warpspan.Warpspan;
+import ai.razin.warpspan.Warpspan;
 
 public static void main(String[] args) {
   Warpspan.install();  // after other ContextStorage.addWrapper calls, before OpenTelemetry is used

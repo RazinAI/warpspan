@@ -1,4 +1,4 @@
-package io.github.zraisan.warpspan;
+package ai.razin.warpspan;
 
 import io.opentelemetry.api.trace.Span;
 import io.opentelemetry.api.trace.SpanContext;

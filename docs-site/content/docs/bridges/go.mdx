@@ -6,7 +6,7 @@ description: Wrap the cgo calls that launch GPU work, and flush before exiting.
 Go keeps the current span in a `context.Context`, not per thread, and goroutines move between OS threads. There's nothing to hook, so the Go bridge wraps the calls that launch GPU work instead.
 
 ```go
-import warpspan "github.com/zraisan/warpspan/bridge/go"
+import warpspan "github.com/RazinAI/warpspan/bridge/go"
 
 func main() {
 	if err := warpspan.Install(""); err != nil && !errors.Is(err, warpspan.ErrNotConfigured) {
@@ -27,4 +27,4 @@ func handle(ctx context.Context) {
 - Only launches on the calling OS thread are linked: not those from goroutines `fn` starts, nor from threads a C library or a Go CUDA binding launches on.
 - **Call `Flush()` before exiting.** Go exits without running C `atexit` handlers, so the library's own exit flush never runs and the last second of kernels is lost. `os.Exit` and `log.Fatal` skip deferred calls too. `Flush` returns `false` if it had nothing to call.
 
-The module is `github.com/zraisan/warpspan/bridge/go` and needs cgo.
+The module is `github.com/RazinAI/warpspan/bridge/go` and needs cgo.

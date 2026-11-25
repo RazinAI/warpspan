@@ -27,7 +27,7 @@ import (
 	profilespb "go.opentelemetry.io/proto/otlp/profiles/v1development"
 	resourcepb "go.opentelemetry.io/proto/otlp/resource/v1"
 
-	"github.com/zraisan/warpspan/agent/collect"
+	"github.com/RazinAI/warpspan/agent/collect"
 )
 
 // Profile and sample type names. Changing them changes the Pyroscope profile type IDs:

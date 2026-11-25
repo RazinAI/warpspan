@@ -6,7 +6,7 @@ import (
 	"testing"
 	"time"
 
-	"github.com/zraisan/warpspan/agent/wire"
+	"github.com/RazinAI/warpspan/agent/wire"
 )
 
 func TestResourceServiceName(t *testing.T) {

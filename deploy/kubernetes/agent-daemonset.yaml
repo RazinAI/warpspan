@@ -32,7 +32,7 @@ spec:
           effect: NoSchedule
       containers:
         - name: agent
-          image: ghcr.io/zraisan/warpspan-agent:0.1.0
+          image: ghcr.io/razinai/warpspan-agent:0.1.0
           args:
             - --socket=/var/run/warpspan/warpspan.sock
             - --otlp-endpoint=http://otel-collector.observability.svc:4317

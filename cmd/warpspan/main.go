@@ -15,9 +15,9 @@ import (
 	"syscall"
 	"time"
 
-	"github.com/zraisan/warpspan/agent/collect"
-	"github.com/zraisan/warpspan/agent/otlp"
-	"github.com/zraisan/warpspan/agent/server"
+	"github.com/RazinAI/warpspan/agent/collect"
+	"github.com/RazinAI/warpspan/agent/otlp"
+	"github.com/RazinAI/warpspan/agent/server"
 )
 
 const version = "0.1.0"

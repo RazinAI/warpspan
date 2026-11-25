@@ -99,7 +99,7 @@ It loads the library from `CUDA_INJECTION64_PATH` and does nothing (returns
 false) when that's unset. Link with `-ldl` on glibc older than 2.34.
 
 Go has no per-thread current span, so the Go bridge
-(`github.com/zraisan/warpspan/bridge/go`) wraps the cgo calls that launch GPU
+(`github.com/RazinAI/warpspan/bridge/go`) wraps the cgo calls that launch GPU
 work: `warpspan.Install("")` once, then `warpspan.Do(ctx, func() { C.launch(...) })`
 publishes the span from `ctx` on a locked OS thread for the duration of the
 call. Only launches on that thread are linked. Call `warpspan.Flush()` before
@@ -108,7 +108,7 @@ run.
 
 For Java (22+, it uses the foreign function API), `make -C bridge/java` builds
 `bridge/java/build/warpspan-otel.jar`; put it on the classpath next to
-`opentelemetry-api`. Call `io.github.zraisan.warpspan.Warpspan.install()` at
+`opentelemetry-api`. Call `ai.razin.warpspan.Warpspan.install()` at
 startup, after any other `ContextStorage.addWrapper` and before anything uses
 OpenTelemetry; it returns false if it was too late. Run the JVM with
 `--enable-native-access=ALL-UNNAMED`. Virtual threads aren't supported. Tested

@@ -23,8 +23,8 @@ build/warpspan-otel.jar: $(SRC)
 test: build/warpspan-otel.jar capture
 	rm -rf build/test-classes && mkdir -p build/test-classes
 	javac --release 22 -cp build/classes:$(TEST_CP) -d build/test-classes $(TEST)
-	$(JAVA_RUN) io.github.zraisan.warpspan.WarpspanTest $(LIB)
-	$(JAVA_RUN) io.github.zraisan.warpspan.WarpspanTest $(LIB) --late
+	$(JAVA_RUN) ai.razin.warpspan.WarpspanTest $(LIB)
+	$(JAVA_RUN) ai.razin.warpspan.WarpspanTest $(LIB) --late
 
 capture:
 	$(MAKE) -C ../../capture

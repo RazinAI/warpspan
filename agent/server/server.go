@@ -15,8 +15,8 @@ import (
 	"sync/atomic"
 	"syscall"
 
-	"github.com/zraisan/warpspan/agent/collect"
-	"github.com/zraisan/warpspan/agent/wire"
+	"github.com/RazinAI/warpspan/agent/collect"
+	"github.com/RazinAI/warpspan/agent/wire"
 )
 
 // Listen creates the socket at path, replacing a stale socket file. The socket
