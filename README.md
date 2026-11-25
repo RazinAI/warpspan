@@ -9,15 +9,17 @@ variables set at process start.
 
 **Docs:** https://warpspan.docs.razin.ai · **Write-up:** [GPU Time per Request](https://razin.ai/blog/gpu-time-per-request)
 
-```
- app process (e.g. PyTorch)                                   same node
-┌───────────────────────────────────────────────┐
-│ OTel SDK ─attach/detach─▶ span bridge (Python)│
-│                              │ warpspan_set_span()
-│ CUDA ──CUPTI──▶ libwarpspan.so ◀┘              │ unix socket  ┌────────────┐ OTLP/gRPC ┌───────────┐
-│   launch:   correlation_id → current span      ├─────────────▶│ agent (Go) ├──────────▶│ Collector │─▶ Pyroscope
-│   activity: kernel name, GPU start/end         │              └────────────┘           └───────────┘
-└───────────────────────────────────────────────┘
+```mermaid
+flowchart LR
+  subgraph app["app process (e.g. PyTorch)"]
+    otel["OTel SDK"] -- "attach / detach" --> bridge["span bridge<br/>(Python, C++, Go, Java, Rust)"]
+    bridge -- "warpspan_set_span()" --> lib["libwarpspan.so<br/>launch: correlation_id → current span<br/>activity: kernel name, GPU start/end"]
+    cuda["CUDA"] -- "CUPTI" --> lib
+  end
+  lib -- "unix socket" --> agent["agent (Go)<br/>same node"]
+  agent -- "OTLP/gRPC" --> collector["OTel Collector"]
+  collector --> pyroscope["Pyroscope"]
+  pyroscope --> grafana["Grafana"]
 ```
 
 | Path | What |
@@ -192,6 +194,13 @@ Tested with Collector 0.165.0 and Pyroscope 2.4.4.
   may fail to attach while warpspan is active; use `WARPSPAN_DISABLE=1` for those runs.
 - A process that `fork()`s after CUDA initialisation isn't profiled in the child.
 - The agent socket is world-writable; see the trust model in `docs/protocol.md`.
+
+## License
+
+[PolyForm Strict 1.0.0](LICENSE). You may use Warpspan for noncommercial purposes
+(personal use, research, education, noncommercial organizations). You may not
+distribute it or make changes or new works based on it. For commercial use or
+other terms, contact hello@razin.ai.
 
 ## Tests
 

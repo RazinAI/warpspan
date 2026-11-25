@@ -4,6 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "warpspan"
+license = { text = "PolyForm-Strict-1.0.0" }
 version = "0.1.0"
 description = "Span bridge linking OpenTelemetry spans to GPU kernels captured by libwarpspan.so"
 requires-python = ">=3.9"

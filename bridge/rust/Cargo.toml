@@ -5,6 +5,7 @@ edition = "2024"
 rust-version = "1.85"
 description = "Links CUDA kernels to the current OpenTelemetry span for warpspan (tracing layer)"
 publish = false
+license-file = "../../LICENSE"
 
 [dependencies]
 libc = "0.2"
