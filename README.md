@@ -217,21 +217,33 @@ Tested with Collector 0.165.0 and Pyroscope 2.4.4.
 - A process that `fork()`s after CUDA initialisation isn't profiled in the child.
 - The agent socket is world-writable; see the trust model in `docs/protocol.md`.
 
+## Tests
+
+```sh
+make test
+```
+
+This builds `libwarpspan.so`, then runs the Go tests (agent and Go bridge) and
+the Python bridge tests, which need `pip install opentelemetry-sdk pytest`. It
+needs the CUDA toolkit for the build, but no GPU.
+
+The other bridges' tests run when their tools are there, and are skipped
+otherwise:
+
+- **C++:** `OTEL_CPP` points at the opentelemetry-cpp sources.
+- **Java:** `MAVEN_JARS` holds the OpenTelemetry jars (see `bridge/java/Makefile`).
+- **Rust:** `cargo` is installed.
+
+The Python 3.14 context-watcher tests run only on Python 3.14 or newer; older
+versions skip them. To run them, pick the interpreter:
+
+```sh
+make test PYTHON=python3.14
+```
+
 ## License
 
 [PolyForm Strict 1.0.0](LICENSE). You may use Warpspan for noncommercial purposes
 (personal use, research, education, noncommercial organizations). You may not
 distribute it or make changes or new works based on it. For commercial use or
 other terms, contact hello@razin.ai.
-
-## Tests
-
-```sh
-make test   # Go tests + Python bridge tests (pip install opentelemetry-sdk pytest)
-            # + Go bridge tests, + C++ bridge tests if OTEL_CPP points at
-            #   opentelemetry-cpp sources, + Java bridge tests if MAVEN_JARS
-            #   holds the OpenTelemetry jars (see bridge/java/Makefile),
-            #   + Rust bridge tests if cargo is installed
-            # The Python 3.14 context-watcher tests need PYTHON=python3.14 (with
-            # opentelemetry-sdk and pytest); older Pythons skip them.
-```
