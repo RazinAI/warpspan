@@ -160,14 +160,23 @@ def test_opentelemetry_instrument_entry_point():
     except Exception:
         pytest.skip("entry points unavailable")
     code = "import warpspan._bridge as b; print(b._wrapper is not None)"
-    env = dict(os.environ, CUDA_INJECTION64_PATH=str(LIB), OTEL_TRACES_EXPORTER="none",
-               OTEL_METRICS_EXPORTER="none", OTEL_LOGS_EXPORTER="none")
+    env = dict(
+        os.environ,
+        CUDA_INJECTION64_PATH=str(LIB),
+        OTEL_TRACES_EXPORTER="none",
+        OTEL_METRICS_EXPORTER="none",
+        OTEL_LOGS_EXPORTER="none",
+    )
     env.pop("PYTHONPATH", None)
-    out = subprocess.run([exe, sys.executable, "-c", code], env=env, capture_output=True, text=True, check=True)
+    out = subprocess.run(
+        [exe, sys.executable, "-c", code], env=env, capture_output=True, text=True, check=True
+    )
     assert out.stdout.strip() == "True", out.stderr
 
 
-needs_context_watchers = pytest.mark.skipif(sys.version_info < (3, 14), reason="context watchers need Python 3.14")
+needs_context_watchers = pytest.mark.skipif(
+    sys.version_info < (3, 14), reason="context watchers need Python 3.14"
+)
 
 
 @needs_context_watchers
@@ -249,5 +258,7 @@ assert ctx.run(_current_span) == want
 print("ok")
 """
     )
-    out = subprocess.run([sys.executable, str(script)], capture_output=True, text=True, timeout=60)
+    out = subprocess.run(
+        [sys.executable, str(script)], check=False, capture_output=True, text=True, timeout=60
+    )
     assert out.returncode == 0 and out.stdout.strip() == "ok", out.stderr

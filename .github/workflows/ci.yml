@@ -1,0 +1,114 @@
+# Lint and tests on every push to master and every pull request. A newer push
+# to the same branch or PR cancels the run still going.
+#
+# No GPU is needed: libwarpspan.so is built against the CUDA headers and CUPTI
+# from NVIDIA's apt repository, and the tests exercise the span handoff only.
+name: ci
+
+on:
+  push:
+    branches: [master]
+  pull_request:
+  workflow_dispatch:
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.event.pull_request.number || github.ref }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read
+
+defaults:
+  run:
+    shell: bash
+
+env:
+  CUDA: "12-6"
+  OTEL_CPP_VERSION: v1.30.0
+  OTEL_JAVA_VERSION: 1.68.0
+  RUFF_VERSION: 0.17.6
+
+jobs:
+  lint:
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v7
+      - uses: actions/setup-go@v7
+        with:
+          go-version-file: go.mod
+          cache-dependency-path: "**/go.sum"
+      - name: gofmt
+        run: |
+          out=$(git ls-files -z '*.go' ':!:cmd/learn-traces' | xargs -0 gofmt -l)
+          [ -z "$out" ] || { echo "::error::run gofmt -w on:"; echo "$out"; exit 1; }
+      - uses: astral-sh/setup-uv@v10
+      - name: ruff
+        working-directory: bridge/python
+        run: |
+          uvx "ruff@$RUFF_VERSION" check .
+          uvx "ruff@$RUFF_VERSION" format --check .
+      - name: rustfmt
+        working-directory: bridge/rust
+        run: cargo fmt --check
+
+  test:
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v7
+
+      - name: CUDA headers and CUPTI
+        run: |
+          curl -fsSLO https://developer.download.nvidia.com/compute/cuda/repos/ubuntu2404/x86_64/cuda-keyring_1.1-1_all.deb
+          sudo dpkg -i cuda-keyring_1.1-1_all.deb
+          sudo apt-get update -q
+          sudo apt-get install -y -q --no-install-recommends \
+            "cuda-cupti-dev-$CUDA" "cuda-cudart-dev-$CUDA" "cuda-driver-dev-$CUDA" "cuda-crt-$CUDA"
+          echo "CUDA_HOME=/usr/local/cuda-${CUDA/-/.}" >> "$GITHUB_ENV"
+
+      - uses: actions/setup-go@v7
+        with:
+          go-version-file: go.mod
+          cache-dependency-path: "**/go.sum"
+      - uses: actions/setup-java@v6
+        with:
+          distribution: temurin
+          java-version: "25"
+      - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: bridge/rust
+      - uses: astral-sh/setup-uv@v10
+
+      - name: Python environments (3.9 is the oldest supported, 3.14 has context watchers)
+        run: |
+          for v in 3.9 3.12 3.14; do
+            uv venv -q --python "$v" "$RUNNER_TEMP/py$v"
+            uv pip install -q --python "$RUNNER_TEMP/py$v" opentelemetry-sdk pytest
+          done
+
+      - name: OpenTelemetry C++ sources and Java jars for the bridge tests
+        run: |
+          deps="$HOME/.cache/warpspan-deps"
+          git clone -q --depth 1 --branch "$OTEL_CPP_VERSION" \
+            https://github.com/open-telemetry/opentelemetry-cpp "$deps/opentelemetry-cpp"
+          mkdir -p "$deps/maven"
+          for a in api context common sdk-trace sdk-common; do
+            jar="opentelemetry-$a-$OTEL_JAVA_VERSION.jar"
+            curl -fsSL -o "$deps/maven/$jar" \
+              "https://repo1.maven.org/maven2/io/opentelemetry/opentelemetry-$a/$OTEL_JAVA_VERSION/$jar"
+          done
+
+      - name: make test
+        run: |
+          make test PYTHON="$RUNNER_TEMP/py3.12/bin/python" OTEL_JAVA_VERSION="$OTEL_JAVA_VERSION" 2>&1 | tee test.log
+          if grep '^skipping' test.log; then
+            echo "::error::a bridge test was skipped; CI should run all of them"
+            exit 1
+          fi
+
+      - name: Python bridge on 3.9 and 3.14
+        working-directory: bridge/python
+        run: |
+          for v in 3.9 3.14; do
+            echo "== Python $v"
+            "$RUNNER_TEMP/py$v/bin/python" -m pytest -q
+          done
