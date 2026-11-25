@@ -164,6 +164,11 @@ GPU pods still need the init container, volumes and environment variables added
 by hand; `helm install` prints them, and `example-gpu-pod.yaml` shows them in
 full. A mutating webhook that would add them doesn't exist yet.
 
+CI builds the images too: `ghcr.io/razinai/warpspan-agent:<version>` and
+`ghcr.io/razinai/warpspan-inject:<version>-cuda<11.8|12.4|12.6|12.8|13.0>` (plain
+`<version>` is CUDA 12.6). The chart's `appVersion`, the agent's `version` and the
+Python package version must match; CI checks.
+
 [`deploy/kubernetes/`](deploy/kubernetes/) has the same setup as plain manifests:
 
 1. Build and push the images:

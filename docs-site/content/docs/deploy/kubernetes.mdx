@@ -20,7 +20,16 @@ flowchart LR
 <Steps>
 <Step>
 
-### Build and push the images
+### Images
+
+CI publishes both images to GHCR (private for now, like the repo):
+
+| Image | Tags |
+| --- | --- |
+| `ghcr.io/razinai/warpspan-agent` | `<version>`, `edge` |
+| `ghcr.io/razinai/warpspan-inject` | `<version>-cuda11.8`, `-cuda12.4`, `-cuda12.6`, `-cuda12.8`, `-cuda13.0`; plain `<version>` is CUDA 12.6 |
+
+Pick the inject tag whose CUDA version is no newer than what your nodes' driver supports. The CUDA 13.0 build needs glibc 2.35 or newer in the app image; the others need 2.31. To build them yourself:
 
 ```sh
 docker build -f agent/Dockerfile -t <registry>/warpspan-agent:0.1.0 .
