@@ -110,7 +110,7 @@ export default function HomePage() {
           What you get
         </h2>
         <p className="mb-10 max-w-2xl text-2xl leading-snug">
-          Traces tell you a request was slow. Warpspan shows what the GPU did for it.
+          The GPU work behind each span in your traces, in the Grafana you already use.
         </p>
         <div className="grid gap-px overflow-hidden border border-fd-border bg-fd-border sm:grid-cols-2 lg:grid-cols-4">
           {features.map(item => (
@@ -148,8 +148,8 @@ export default function HomePage() {
             Span bridges
           </h2>
           <p className="text-2xl leading-snug">
-            The library sees kernels. Your tracing library knows the span. A
-            bridge of a few dozen lines connects the two.
+            A small bridge per language tells the capture library which span is
+            current on each thread.
           </p>
           <Link
             href="/docs/bridges"
