@@ -258,7 +258,11 @@ assert ctx.run(_current_span) == want
 print("ok")
 """
     )
+    # The package may not be installed: find it from the source tree, in the
+    # subprocess and in its sub-interpreter.
+    src = str(Path(__file__).resolve().parent.parent / "src")
+    env = dict(os.environ, PYTHONPATH=os.pathsep.join(filter(None, [src, os.environ.get("PYTHONPATH")])))
     out = subprocess.run(
-        [sys.executable, str(script)], check=False, capture_output=True, text=True, timeout=60
+        [sys.executable, str(script)], env=env, check=False, capture_output=True, text=True, timeout=60
     )
     assert out.returncode == 0 and out.stdout.strip() == "ok", out.stderr
