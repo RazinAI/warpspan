@@ -3,7 +3,7 @@ title: Kubernetes
 description: An agent DaemonSet on GPU nodes and an init container that puts the library into each GPU pod.
 ---
 
-The agent installs with a Helm chart. GPU pods still need a few lines added to their spec by hand; a mutating webhook that would add them doesn't exist yet. `deploy/kubernetes/` has the same setup as plain manifests.
+The agent installs with a Helm chart. GPU pods still need a few lines added to their spec by hand; a mutating webhook that would add them doesn't exist yet. `deploy/kubernetes/example-gpu-pod.yaml` shows those lines in full.
 
 ```mermaid
 flowchart LR

@@ -72,6 +72,10 @@ start: warpspan logs `CUPTI setup failed` and the app runs unprofiled.
 
 ## Try it on a GPU machine
 
+This runs the example from a source build. To add Warpspan to a service you
+already run, with your own Collector and Grafana, follow
+[Add it to your service](https://warpspan.docs.razin.ai/docs/setup).
+
 ```sh
 make
 

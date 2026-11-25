@@ -157,3 +157,8 @@ h4 {
     animation: none;
   }
 }
+
+/* Long inline code (paths, URLs) wraps instead of running off a phone screen. */
+.prose :not(pre) > code {
+  overflow-wrap: anywhere;
+}
