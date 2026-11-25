@@ -6,6 +6,12 @@
 # <version> is the chart's appVersion; the agent and the Python package must
 # match it. A version tag that already exists is never overwritten: bump the
 # version to release. Pull requests only build.
+#
+# When the version is new (no tag v<version> yet), the release job also creates
+# the GitHub release v<version>: the library per CUDA version (with libcupti and
+# the Python bridge), the agent binary, the Python wheel and SHA256SUMS. Its notes
+# are .github/release-notes.md followed by the commits since the last release. It
+# also tags bridge/go/v<version> so the Go bridge can be fetched at that version.
 name: images
 
 on:
@@ -38,6 +44,11 @@ permissions:
   contents: read
   packages: write
 
+# Runs on master queue up rather than cancel each other, so a release is never cut short.
+concurrency:
+  group: ${{ github.workflow }}-${{ github.event.pull_request.number || github.ref }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+
 env:
   REGISTRY: ghcr.io/razinai
   PUSH: ${{ github.event_name != 'pull_request' && github.ref == 'refs/heads/master' }}
@@ -47,7 +58,9 @@ jobs:
     runs-on: ubuntu-latest
     outputs:
       version: ${{ steps.v.outputs.version }}
+      chart_version: ${{ steps.v.outputs.chart_version }}
       sha: ${{ steps.v.outputs.sha }}
+      release: ${{ steps.v.outputs.release }}
     steps:
       - uses: actions/checkout@v5
       - id: v
@@ -62,7 +75,14 @@ jobs:
             [ "$v" = "$chart" ] || { echo "::error::versions differ; set them all to the chart's appVersion ($chart)"; exit 1; }
           done
           echo "version=$chart" >> "$GITHUB_OUTPUT"
+          echo "chart_version=$(awk '/^version:/ {print $2}' deploy/helm/warpspan/Chart.yaml)" >> "$GITHUB_OUTPUT"
           echo "sha=${GITHUB_SHA::7}" >> "$GITHUB_OUTPUT"
+          release=false
+          if [ "$PUSH" = true ] && ! git ls-remote --exit-code --tags origin "refs/tags/v$chart" > /dev/null; then
+            release=true
+            echo "::notice::v$chart is not released yet; this run releases it."
+          fi
+          echo "release=$release" >> "$GITHUB_OUTPUT"
 
   agent:
     needs: version
@@ -102,6 +122,24 @@ jobs:
             org.opencontainers.image.version=${{ needs.version.outputs.version }}
           cache-from: type=gha,scope=agent
           cache-to: type=gha,mode=max,scope=agent
+      # The release binary is taken out of the same build, from the cache.
+      - name: Export the agent binary for the release
+        if: needs.version.outputs.release == 'true'
+        uses: docker/build-push-action@v6
+        with:
+          context: .
+          file: agent/Dockerfile
+          platforms: linux/amd64
+          outputs: type=local,dest=out
+          cache-from: type=gha,scope=agent
+      - if: needs.version.outputs.release == 'true'
+        run: cp out/warpspan "warpspan-agent-${{ needs.version.outputs.version }}-linux-amd64"
+      - if: needs.version.outputs.release == 'true'
+        uses: actions/upload-artifact@v7
+        with:
+          name: release-agent
+          path: warpspan-agent-*
+          if-no-files-found: error
 
   inject:
     needs: version
@@ -160,3 +198,75 @@ jobs:
             org.opencontainers.image.version=${{ needs.version.outputs.version }}
           cache-from: type=gha,scope=inject-${{ matrix.cuda }}
           cache-to: type=gha,mode=max,scope=inject-${{ matrix.cuda }}
+      # The release archive is the image's /warpspan, taken out of the same build.
+      - name: Export the library for the release
+        if: needs.version.outputs.release == 'true'
+        uses: docker/build-push-action@v6
+        with:
+          context: .
+          file: capture/Dockerfile
+          platforms: linux/amd64
+          build-args: CUDA_IMAGE=${{ matrix.image }}
+          outputs: type=local,dest=out
+          cache-from: type=gha,scope=inject-${{ matrix.cuda }}
+      - name: Pack the library
+        if: needs.version.outputs.release == 'true'
+        env:
+          NAME: warpspan-${{ needs.version.outputs.version }}-cuda${{ matrix.cuda }}
+        run: |
+          mv out/warpspan "$NAME"
+          tar --owner=0 --group=0 -czf "$NAME-linux-x86_64.tar.gz" "$NAME"
+          tar -tzf "$NAME-linux-x86_64.tar.gz"
+      - if: needs.version.outputs.release == 'true'
+        uses: actions/upload-artifact@v7
+        with:
+          name: release-inject-${{ matrix.cuda }}
+          path: warpspan-*.tar.gz
+          if-no-files-found: error
+
+  release:
+    needs: [version, agent, inject]
+    if: needs.version.outputs.release == 'true'
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    env:
+      VERSION: ${{ needs.version.outputs.version }}
+      CHART_VERSION: ${{ needs.version.outputs.chart_version }}
+    steps:
+      - uses: actions/checkout@v5
+        with:
+          fetch-depth: 0
+      - uses: actions/download-artifact@v8
+        with:
+          pattern: release-*
+          path: dist
+          merge-multiple: true
+      - uses: astral-sh/setup-uv@v10
+      - name: Python wheel
+        run: uv build --wheel --out-dir dist bridge/python
+      - name: Checksums
+        working-directory: dist
+        run: |
+          sha256sum * > SHA256SUMS
+          cat SHA256SUMS
+      - name: Release notes
+        run: |
+          envsubst '${VERSION} ${CHART_VERSION}' < .github/release-notes.md > notes.md
+          prev=$(git describe --tags --abbrev=0 --match 'v[0-9]*' 2>/dev/null || true)
+          if [ -z "$prev" ]; then
+            echo "First release." >> notes.md
+          else
+            git log --no-merges --reverse --format='- %s (%h)' "$prev..HEAD" >> notes.md
+            echo >> notes.md
+            echo "All changes: https://github.com/$GITHUB_REPOSITORY/compare/$prev...v$VERSION" >> notes.md
+          fi
+          cat notes.md
+      - name: Create the release and tag the Go bridge
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          gh release create "v$VERSION" dist/* --target "$GITHUB_SHA" \
+            --title "Warpspan $VERSION" --notes-file notes.md
+          git tag "bridge/go/v$VERSION" "$GITHUB_SHA"
+          git push origin "bridge/go/v$VERSION"

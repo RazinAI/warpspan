@@ -54,6 +54,10 @@ Pyroscope 2.4.4, Tempo 2.10, Grafana 13.3):
 
 ## Build
 
+Prebuilt files are on the [releases page](https://github.com/RazinAI/warpspan/releases):
+`libwarpspan.so` for CUDA 11.8, 12.4, 12.6, 12.8 and 13.0 (with its `libcupti` and
+the Python bridge), the agent binary and the Python wheel. To build from source:
+
 Requirements: CUDA toolkit (`cupti.h`, `libcupti.so`), `g++`, `make`, Go ≥ 1.26
 (an older `go` downloads 1.26 automatically).
 
