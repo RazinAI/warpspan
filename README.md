@@ -165,22 +165,17 @@ The chart is private for now: log in first with `helm registry login ghcr.io`
 agent image (`imagePullSecrets` in the values).
 
 GPU pods still need the init container, volumes and environment variables added
-by hand; `helm install` prints them, and `example-gpu-pod.yaml` shows them in
-full. A mutating webhook that would add them doesn't exist yet.
+by hand; `helm install` prints them, and
+[`deploy/kubernetes/example-gpu-pod.yaml`](deploy/kubernetes/example-gpu-pod.yaml)
+shows them in full. A mutating webhook that would add them doesn't exist yet.
+`hostPath` volumes are rejected by the `baseline`/`restricted` Pod Security levels.
+
+Without Helm, `helm template` renders the same manifests for `kubectl apply`.
 
 CI builds the images too: `ghcr.io/razinai/warpspan-agent:<version>` and
 `ghcr.io/razinai/warpspan-inject:<version>-cuda<11.8|12.4|12.6|12.8|13.0>` (plain
 `<version>` is CUDA 12.6). The chart's `appVersion`, the agent's `version` and the
 Python package version must match; CI checks.
-
-[`deploy/kubernetes/`](deploy/kubernetes/) has the same setup as plain manifests:
-
-1. Build and push the images:
-   - `docker build -f agent/Dockerfile -t <registry>/warpspan-agent:0.1.0 .`
-   - `docker build -f capture/Dockerfile --build-arg CUDA_IMAGE=nvidia/cuda:<your CUDA>-devel-ubuntu20.04 -t <registry>/warpspan-inject:0.1.0 .`
-2. Edit the image and `--otlp-endpoint` in `agent-daemonset.yaml`, then `kubectl apply` it.
-3. Add the init container, env vars and volumes from `example-gpu-pod.yaml` to the GPU workload.
-   `hostPath` volumes are rejected by the `baseline`/`restricted` Pod Security levels.
 
 ## Configuration
 

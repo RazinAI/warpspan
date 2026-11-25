@@ -39,7 +39,7 @@ jobs:
           cache-dependency-path: "**/go.sum"
       - name: gofmt
         run: |
-          out=$(git ls-files -z '*.go' ':!:cmd/learn-traces' | xargs -0 gofmt -l)
+          out=$(git ls-files -z '*.go' | xargs -0 gofmt -l)
           [ -z "$out" ] || { echo "::error::run gofmt -w on:"; echo "$out"; exit 1; }
       - uses: astral-sh/setup-uv@v10.4.0
       - name: ruff

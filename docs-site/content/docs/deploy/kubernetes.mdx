@@ -67,7 +67,7 @@ The agent runs on nodes labelled `nvidia.com/gpu.present=true` (`nodeSelector` i
 | `socketDir` | `/var/run/warpspan` | host directory shared with GPU pods |
 | `nodeSelector`, `tolerations`, `affinity` | GPU nodes | where the agent runs |
 
-Without Helm, edit the image and `--otlp-endpoint` in `deploy/kubernetes/agent-daemonset.yaml` and `kubectl apply` it.
+Without Helm, `helm template` renders the same manifests for `kubectl apply`.
 
 </Step>
 <Step>
