@@ -1,0 +1,30 @@
+---
+title: Go
+description: Wrap the cgo calls that launch GPU work, and flush before exiting.
+---
+
+Go keeps the current span in a `context.Context`, not per thread, and goroutines move between OS threads. There's nothing to hook, so the Go bridge wraps the calls that launch GPU work instead.
+
+```go
+import warpspan "github.com/zraisan/warpspan/bridge/go"
+
+func main() {
+	if err := warpspan.Install(""); err != nil && !errors.Is(err, warpspan.ErrNotConfigured) {
+		log.Print(err)
+	}
+	defer warpspan.Flush()
+	// ...
+}
+
+func handle(ctx context.Context) {
+	warpspan.Do(ctx, func() { C.run_model() })
+}
+```
+
+`Do` locks the goroutine to its OS thread, publishes the span from `ctx`, runs `fn` and restores the thread's previous span. Each call costs a few cgo calls, so wrap a request's or a batch's GPU work, not every kernel.
+
+- `Install("")` reads `CUDA_INJECTION64_PATH`. It returns `ErrNotConfigured` when that's unset, which apps that also run without Warpspan can ignore.
+- Only launches on the calling OS thread are linked: not those from goroutines `fn` starts, nor from threads a C library or a Go CUDA binding launches on.
+- **Call `Flush()` before exiting.** Go exits without running C `atexit` handlers, so the library's own exit flush never runs and the last second of kernels is lost. `os.Exit` and `log.Fatal` skip deferred calls too. `Flush` returns `false` if it had nothing to call.
+
+The module is `github.com/zraisan/warpspan/bridge/go` and needs cgo.

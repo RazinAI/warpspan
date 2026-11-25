@@ -1,0 +1,35 @@
+---
+title: Rust
+description: A tracing layer for services that use tracing-opentelemetry.
+---
+
+Most Rust services use OpenTelemetry through `tracing` and `tracing-opentelemetry`, so the Rust bridge is a `tracing` layer. On every span enter and exit it publishes `opentelemetry::Context::current()`, which the OpenTelemetry layer has just set.
+
+```rust
+let warpspan = match warpspan_otel::layer() {
+    Ok(layer) => Some(layer),
+    Err(warpspan_otel::Error::NotConfigured) => None, // warpspan isn't in use
+    Err(e) => { eprintln!("{e}"); None }
+};
+let subscriber = tracing_subscriber::registry()
+    .with(tracing_opentelemetry::layer().with_tracer(tracer))
+    .with(warpspan); // after the OpenTelemetry layer
+```
+
+Use the crate as a path dependency on `bridge/rust` (`warpspan-otel`, Rust 1.85 or newer).
+
+## Async
+
+An instrumented future (`.instrument(span)` or `#[instrument]`) enters its span every time it's polled and exits it when it yields. So when one thread runs many tasks, each poll publishes the right span. Work moved to `spawn_blocking`, rayon or un-instrumented tasks isn't linked.
+
+## Getting it right
+
+Three mistakes link nothing, and none of them can be detected up front:
+
+- adding the Warpspan layer **before** the OpenTelemetry layer;
+- turning off the OpenTelemetry layer's context activation (it's on by default);
+- an app on a different `opentelemetry` version than the bridge's 0.33, since each version has its own current context.
+
+If the layer sees no OpenTelemetry span in its first 10,000 span enters, it prints one warning to stderr.
+
+Plain `opentelemetry::Context::attach` without a `tracing` span isn't seen.

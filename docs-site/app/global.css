@@ -1,0 +1,159 @@
+@import 'tailwindcss';
+@import 'fumadocs-ui/css/neutral.css';
+@import 'fumadocs-ui/css/preset.css';
+
+/*
+ * Warpspan's palette, from the Razin site (warm ink, parchment, no blue).
+ * Saffron is a span, ember is a kernel on the GPU: the two things Warpspan
+ * joins. Light is parchment with deeper versions of both.
+ */
+@theme {
+  --font-sans: var(--font-inter), ui-sans-serif, system-ui, sans-serif;
+  --font-mono: var(--font-plex-mono), ui-monospace, 'SFMono-Regular', monospace;
+
+  --color-fd-background: #f6f2e8;
+  --color-fd-foreground: #1d1915;
+  --color-fd-muted: #ece4d5;
+  --color-fd-muted-foreground: #5d524a;
+  --color-fd-popover: #fbf8f1;
+  --color-fd-popover-foreground: #1d1915;
+  --color-fd-card: #fbf8f1;
+  --color-fd-card-foreground: #1d1915;
+  --color-fd-border: #e2d8c6;
+  --color-fd-primary: #b8571f;
+  --color-fd-primary-foreground: #fbf8f1;
+  --color-fd-secondary: #ece4d5;
+  --color-fd-secondary-foreground: #1d1915;
+  --color-fd-accent: #f1e5cf;
+  --color-fd-accent-foreground: #6b3f14;
+  --color-fd-ring: #b8571f;
+  --color-fd-overlay: rgba(29, 25, 21, 0.35);
+
+  --color-ws-span: #c8901c;
+  --color-ws-kernel: #b8571f;
+  --color-ws-wait: #d6ccbd;
+  --color-ws-code: #efe8da;
+}
+
+.dark {
+  --color-fd-background: #16130f;
+  --color-fd-foreground: #f3eee4;
+  --color-fd-muted: #211d18;
+  --color-fd-muted-foreground: #b3a796;
+  --color-fd-popover: #1c1813;
+  --color-fd-popover-foreground: #f3eee4;
+  --color-fd-card: #1c1813;
+  --color-fd-card-foreground: #f3eee4;
+  --color-fd-border: #332c25;
+  --color-fd-primary: #e9873a;
+  --color-fd-primary-foreground: #1b1410;
+  --color-fd-secondary: #241f1a;
+  --color-fd-secondary-foreground: #f3eee4;
+  --color-fd-accent: #2e2419;
+  --color-fd-accent-foreground: #f2c98a;
+  --color-fd-ring: #e9873a;
+  --color-fd-overlay: rgba(10, 8, 6, 0.6);
+
+  --color-ws-span: #f2c14e;
+  --color-ws-kernel: #e9873a;
+  --color-ws-wait: #4f4640;
+  --color-ws-code: #211d18;
+}
+
+.dark #nd-sidebar {
+  --color-fd-muted: #211d18;
+  --color-fd-secondary: #241f1a;
+  --color-fd-muted-foreground: #b3a796;
+}
+
+@theme static {
+  --color-fd-info: #c9a46a;
+  --color-fd-warning: #e0a03a;
+  --color-fd-error: #d07f6f;
+  --color-fd-success: #8fb37a;
+  --color-fd-idea: #f2c14e;
+}
+
+html {
+  scrollbar-gutter: stable;
+}
+
+:root:not(.dark) figure.shiki {
+  background-color: var(--color-ws-code);
+}
+
+body {
+  font-family: var(--font-sans);
+  -webkit-font-smoothing: antialiased;
+}
+
+html > body[data-scroll-locked] {
+  margin-right: 0px !important;
+  --removed-body-scroll-bar-size: 0px !important;
+}
+
+h1,
+h2,
+h3,
+h4 {
+  letter-spacing: -0.02em;
+}
+
+#nd-sidebar,
+#nd-nav,
+#nd-toc,
+#nd-subnav,
+.font-ui {
+  font-family: var(--font-mono);
+  letter-spacing: -0.01em;
+}
+
+.prose :where(h1, h2, h3, h4) {
+  font-weight: 650;
+}
+
+.prose :where(a):not(:where([class~='not-prose'] *)) {
+  text-decoration-color: color-mix(in oklab, var(--color-fd-primary) 55%, transparent);
+  text-underline-offset: 3px;
+}
+
+::selection {
+  background: color-mix(in oklab, var(--color-ws-span) 40%, transparent);
+}
+
+/* The home page's timeline: kernels land on the GPU lane one after another,
+   then the line to their span lights. Played once, then holds. */
+@keyframes ws-land {
+  from {
+    transform: scaleX(0);
+  }
+  to {
+    transform: scaleX(1);
+  }
+}
+
+@keyframes ws-link {
+  from {
+    opacity: 0;
+  }
+  to {
+    opacity: 1;
+  }
+}
+
+.ws-kernel {
+  transform-box: fill-box;
+  transform-origin: left center;
+  animation: ws-land 0.45s cubic-bezier(0.2, 0.7, 0.2, 1) both;
+}
+
+.ws-tie {
+  animation: ws-link 0.35s ease-out both;
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .ws-kernel,
+  .ws-tie {
+    animation: none;
+  }
+}

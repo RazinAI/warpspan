@@ -1,0 +1,23 @@
+---
+title: C++
+description: Header-only, for apps that use the OpenTelemetry C++ API.
+---
+
+The C++ bridge replaces OpenTelemetry's runtime context storage with one that wraps the default thread-local storage and publishes the current span after every `Attach` and `Detach`.
+
+```cpp
+#include "warpspan/otel_bridge.h"
+
+int main() {
+  warpspan::otel::Install();  // at startup, before other threads use OpenTelemetry
+  // ...
+}
+```
+
+Add `bridge/cpp/include` to your include path. The header needs the opentelemetry-cpp API headers only, and `-ldl` on glibc older than 2.34.
+
+- `Install()` loads the library from `CUDA_INJECTION64_PATH`. When that's unset it returns `false` silently. When the library can't be loaded or has another ABI version it returns `false` and prints why to stderr.
+- It has to run at startup, before other threads use OpenTelemetry: the API only allows replacing the storage then. A span already active on the calling thread is picked up.
+- Calling it again does nothing.
+
+Spans are tracked per thread. Coroutines or fibers that switch spans without `Attach` and `Detach` get kernels attributed to the last attached span.

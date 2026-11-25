@@ -1,0 +1,38 @@
+---
+title: How bridges work
+description: Why each language needs a small bridge, and the rules every bridge follows.
+---
+
+The capture library sees kernels. It doesn't see spans: the current span lives inside the app's OpenTelemetry library, in that language's own context mechanism. A span bridge is the small piece that passes it across. It hooks the spot where the current span changes and calls one C function in the library:
+
+```c
+void warpspan_set_span(const uint8_t *trace_id, const uint8_t *span_id); /* NULL clears */
+```
+
+That call is a memory write into a thread-local, a few nanoseconds. The bridge never talks to the agent and never sends spans anywhere; the app's OpenTelemetry SDK keeps exporting traces as before. Bridges only use their language's OpenTelemetry **API**, never the SDK, so they work with whatever SDK setup the app has.
+
+## Rules every bridge follows
+
+- Publish the span when it becomes current and the parent (or nothing) when it ends.
+- Publish only spans that are valid, sampled and local. Clear the span otherwise.
+- Set `pyroscope.profile.id` to the span ID, in lowercase hex, once per span. Grafana needs it for the "Profiles for this span" button.
+- Load the same file CUDA loads, from `CUDA_INJECTION64_PATH`. A different copy has its own thread-local and nothing gets linked.
+- Never break the app: when the library is missing or has another ABI version, do nothing and say why.
+
+## Choosing a bridge
+
+| Language | Hook | App change |
+| --- | --- | --- |
+| [Python](/docs/bridges/python) | OpenTelemetry context attach and detach; context watchers on 3.14+ | none |
+| [C++](/docs/bridges/cpp) | `RuntimeContextStorage` | one `Install()` call |
+| [Go](/docs/bridges/go) | none possible; you wrap GPU calls | `Do(ctx, fn)` around cgo calls |
+| [Java](/docs/bridges/java) | `ContextStorage.addWrapper` | one `install()` call |
+| [Rust](/docs/bridges/rust) | a `tracing` layer | one layer in the subscriber |
+
+Put the bridge in the process that launches the kernels, which isn't always the one that receives the request. Serving stacks often split the two (a router in front of GPU workers); the trace context travels between them in request headers as usual.
+
+## Writing one for another language
+
+Anything that can call a C function can be a bridge. Find where your language's OpenTelemetry API changes the current context, call `warpspan_set_span` with the current span's 16-byte trace ID and 8-byte span ID right after, and follow the rules above. `warpspan_abi_version()` returns the ABI version to check against (currently 1). The full C API is in [C API](/docs/reference/c-api).
+
+Languages where one thread switches between requests without telling OpenTelemetry (Node.js, for example) don't fit this per-thread model, and have no bridge.

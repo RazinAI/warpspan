@@ -1,0 +1,95 @@
+---
+title: Quickstart
+description: Build Warpspan, start the backend and the agent, and profile the PyTorch example on a GPU machine.
+---
+
+You need a Linux machine with an NVIDIA GPU, the CUDA toolkit (for `cupti.h` and `libcupti.so`), `g++`, `make` and Go 1.26 or newer. An older `go` downloads 1.26 by itself. For the full backend you also need Docker.
+
+<Steps>
+<Step>
+
+### Build
+
+```sh
+git clone https://github.com/zraisan/warpspan
+cd warpspan
+make
+```
+
+That builds `capture/libwarpspan.so`, the agent `bin/warpspan` and a small debug receiver, `bin/profiles-dump`.
+
+Build the library against a CUDA toolkit that is **no newer than your driver supports**. `nvidia-smi` shows that version at the top right, as "CUDA Version". To pick a toolkit:
+
+```sh
+make -C capture CUDA_HOME=/usr/local/cuda-12.4
+```
+
+If the toolkit is newer than the driver, CUPTI fails to start, Warpspan logs `CUPTI setup failed`, and the app runs unprofiled.
+
+</Step>
+<Step>
+
+### Start a receiver
+
+Either print what arrives:
+
+```sh
+./bin/profiles-dump -listen 127.0.0.1:4317 &
+```
+
+or run the full backend (Collector, Pyroscope, Tempo and Grafana):
+
+```sh
+docker compose -f deploy/docker-compose.yaml up -d
+```
+
+Grafana listens on `localhost:3000`. Set `GRAFANA_PORT=3001` if that port is taken.
+
+</Step>
+<Step>
+
+### Start the agent
+
+```sh
+./bin/warpspan --socket /tmp/warpspan/warpspan.sock --otlp-endpoint http://127.0.0.1:4317 &
+```
+
+`http://` means plaintext. See [Configuration](/docs/reference/configuration) for TLS and headers.
+
+</Step>
+<Step>
+
+### Run a CUDA program with Warpspan
+
+The example is a small PyTorch model behind OpenTelemetry spans. It needs `torch` and `opentelemetry-sdk`.
+
+```sh
+export CUDA_INJECTION64_PATH=$PWD/capture/libwarpspan.so
+export WARPSPAN_SOCKET=/tmp/warpspan/warpspan.sock
+export OTEL_SERVICE_NAME=torch-spans-example
+export PYTHONPATH=$PWD/bridge/python/autoload:$PWD/bridge/python/src
+python examples/torch-spans/app.py --requests 50
+```
+
+The `PYTHONPATH` line loads the Python span bridge. Any other CUDA program works too; without a bridge its kernels are recorded without spans.
+
+</Step>
+</Steps>
+
+## What to look for
+
+- On stderr the app prints `warpspan: loaded …`, then `warpspan: connected to agent …`, and at exit `warpspan: exiting: N kernels, M linked to spans, …`. If M is 0 while the app creates spans, the bridge isn't loaded.
+- The agent logs one `interval` line per export, with `kernels=` and `linked_to_spans=`.
+- `profiles-dump` prints samples such as `[812345]  cuda:0 > at::native::… [trace=… span=…]`. The IDs match the ones the example prints.
+- In Grafana, pick the Pyroscope data source, profile type `gpu` then `gpu_time`, service `torch-spans-example`. A freshly started Pyroscope can take about a minute before data is queryable.
+- In Grafana's trace view, open a trace from Tempo and click a span: **Profiles for this span** shows its kernels.
+
+## Without any backend
+
+To check the capture side alone, skip the agent and write one line per kernel:
+
+```sh
+WARPSPAN_DEBUG_FILE=- python examples/torch-spans/app.py --requests 1
+```
+
+`-` means stderr; any other value is a file path. Each line has the kernel name, GPU start and end, the device and the trace and span IDs.

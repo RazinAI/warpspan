@@ -7,6 +7,8 @@ launching thread, and exports them as OTLP profiles (for example to Pyroscope).
 It works like auto-instrumentation: no app code changes, only environment
 variables set at process start.
 
+**Docs:** https://warpspan.docs.razin.ai · **Write-up:** [GPU Time per Request](https://razin.ai/blog/gpu-time-per-request)
+
 ```
  app process (e.g. PyTorch)                                   same node
 ┌───────────────────────────────────────────────┐
@@ -30,6 +32,7 @@ variables set at process start.
 | `tools/profiles-dump/` | tiny OTLP profiles receiver that prints what it gets |
 | `deploy/` | docker-compose backend (Collector, Pyroscope, Tempo, Grafana), Kubernetes manifests |
 | `docs/` | [ADRs](docs/decisions/), [wire protocol](docs/protocol.md) |
+| `docs-site/` | the docs site at warpspan.docs.razin.ai (Fumadocs, static export) |
 
 **Status:** prototype. Linux x86_64, NVIDIA GPUs. Tested on one machine (RTX
 3070, CUDA 13.4, driver 615). The build has guards for CUDA 11.6+, but older

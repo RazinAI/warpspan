@@ -1,0 +1,34 @@
+---
+title: C API
+description: The functions libwarpspan.so exports, for writing a span bridge.
+---
+
+The public header is `capture/include/warpspan.h`. Everything else in the library is hidden, including its statically linked C++ runtime, so it can't clash with the app's libraries.
+
+```c
+#define WARPSPAN_ABI_VERSION 1u
+
+uint32_t warpspan_abi_version(void);
+void     warpspan_set_span(const uint8_t *trace_id, const uint8_t *span_id);
+int      warpspan_get_span(uint8_t *trace_id, uint8_t *span_id);
+void     warpspan_flush(void);
+int      warpspan_python_watch(const warpspan_python_api *api);
+```
+
+Load the library from `CUDA_INJECTION64_PATH` with `dlopen`. Because it's the same file, you get the copy CUDA loaded, with the same thread-local. Check `warpspan_abi_version()` against the version you were written for.
+
+### `warpspan_set_span`
+
+Sets the span for the calling thread. `trace_id` is 16 bytes and `span_id` 8 bytes, in W3C (OTLP) byte order. Passing `NULL` for either, or all-zero IDs, clears it. Kernels launched afterwards on this thread are tagged with this span. It's a plain thread-local write, cheap enough to call on every span change.
+
+### `warpspan_get_span`
+
+Copies the calling thread's span into the two buffers and returns 1, or returns 0 if there is none. Meant for tests.
+
+### `warpspan_flush`
+
+Hands all records of finished kernels to the agent now, the way the library does at exit through `atexit`. Runtimes that skip `atexit`, such as Go, should call it before exiting. Synchronise the GPU first: kernels still running aren't included. Added after ABI version 1 was published, so look it up as an optional symbol.
+
+### `warpspan_python_watch`
+
+Registers the Python 3.14 context watcher used by the Python bridge. The bridge passes a context variable holding the current span's 24 ID bytes, and pointers to the few Python C API functions the watcher needs, so the library builds without Python headers. Only the first interpreter to register gets the watcher. Optional symbol, like `warpspan_flush`.

@@ -1,0 +1,45 @@
+---
+title: Configuration
+description: Environment variables of the capture library and flags of the agent.
+---
+
+## Capture library
+
+Set in the environment of the app process. The library reads them once, when CUDA initialises.
+
+| Variable | Default | |
+| --- | --- | --- |
+| `CUDA_INJECTION64_PATH` | none | Path to `libwarpspan.so`. Setting it is what turns Warpspan on. |
+| `WARPSPAN_SOCKET` | `/var/run/warpspan/warpspan.sock` | The agent's socket. Empty means don't send. Paths over 107 bytes are rejected. |
+| `WARPSPAN_DEBUG_FILE` | none | Also write one text line per kernel here. `-` means stderr. |
+| `WARPSPAN_QUIET` | | `1` turns off the library's log lines on stderr. |
+| `WARPSPAN_DISABLE` | | `1` loads the library but does nothing. Use it for runs with Nsight Systems or `torch.profiler`. |
+| `OTEL_SERVICE_NAME`, `OTEL_RESOURCE_ATTRIBUTES` | | Become the profile's `service.name` and resource attributes, as in the OpenTelemetry SDKs. |
+
+Without `OTEL_SERVICE_NAME` or a `service.name` in `OTEL_RESOURCE_ATTRIBUTES`, the service is `unknown_service:<executable>`.
+
+## Agent
+
+```sh
+./bin/warpspan [flags]
+```
+
+| Flag | Environment | Default | |
+| --- | --- | --- | --- |
+| `--socket` | `WARPSPAN_SOCKET` | `/var/run/warpspan/warpspan.sock` | Socket the libraries connect to. |
+| `--otlp-endpoint` | `OTEL_EXPORTER_OTLP_PROFILES_ENDPOINT`, `OTEL_EXPORTER_OTLP_ENDPOINT` | `http://localhost:4317` | OTLP/gRPC endpoint. `none` turns export off. |
+| `--otlp-header k=v` | `OTEL_EXPORTER_OTLP_HEADERS` | | gRPC metadata. Repeat the flag for several. |
+| `--interval` | | `10s` | How often to export. |
+| `--node-name` | `NODE_NAME` | | Added as `k8s.node.name` to every profile. |
+| `--version` | | | Print the version and exit. |
+
+The endpoint's scheme picks the transport: `http://host:port` is plaintext, `https://host:port` or a bare `host:port` uses TLS. A path after the port isn't allowed. Each export has a 10 second timeout, and each round of exports has to finish within one interval (10 seconds at shutdown), so a hung Collector can't stall the agent.
+
+## Limits the agent enforces
+
+| Limit | Value |
+| --- | --- |
+| Message size | 60 KiB |
+| Kernel name length | 2048 bytes (the library truncates longer names) |
+| Samples per process per interval | 20,000 with a span; past that, kernels are counted without their span; past 22,000 they go under `[other kernels]` |
+| Connections | 1024 |

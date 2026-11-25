@@ -1,0 +1,28 @@
+---
+title: Java
+description: A ContextStorage wrapper that calls the library through the foreign function API.
+---
+
+The Java bridge registers a `ContextStorage` wrapper that publishes the current span after every attach and every scope close. It calls the library through `java.lang.foreign`, so there's no JNI library to build, and it needs **Java 22 or newer**.
+
+```sh
+make -C bridge/java   # builds bridge/java/build/warpspan-otel.jar
+```
+
+Put the jar on the classpath next to `opentelemetry-api`, and call `install()` at startup:
+
+```java
+import io.github.zraisan.warpspan.Warpspan;
+
+public static void main(String[] args) {
+  Warpspan.install();  // after other ContextStorage.addWrapper calls, before OpenTelemetry is used
+  // ...
+}
+```
+
+Run the JVM with `--enable-native-access=ALL-UNNAMED` (or your module's name). Without it the JDK warns about native access, and future releases will block it.
+
+- OpenTelemetry only accepts storage wrappers until the storage is first used. `install()` initialises it and returns `false` (with a warning) if its wrapper didn't take effect, which means it ran too late. Wrappers other code adds afterwards are ignored.
+- It reads `CUDA_INJECTION64_PATH` and returns `false` silently when that's unset.
+- Virtual threads aren't supported: they move between carrier threads.
+- It was tested with the OpenTelemetry API and SDK used directly. Under the OpenTelemetry Java agent, which manages context storage itself, `install()` may return `true` without the bridge seeing any spans.

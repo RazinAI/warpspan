@@ -1,0 +1,54 @@
+---
+title: Backend
+description: Collector, Pyroscope, Tempo and Grafana with docker-compose, and what to change for your own.
+---
+
+`deploy/docker-compose.yaml` runs a complete local backend:
+
+| Service | Image | Port on 127.0.0.1 |
+| --- | --- | --- |
+| OpenTelemetry Collector | `otel/opentelemetry-collector:0.165.0` | 4317 (gRPC), 4318 (HTTP) |
+| Pyroscope | `grafana/pyroscope:2.4.4` | 4040 |
+| Tempo | `grafana/tempo:2.10.10` | none |
+| Grafana | `grafana/grafana:13.3.1` | 3000, or `GRAFANA_PORT` |
+
+```sh
+docker compose -f deploy/docker-compose.yaml up -d
+```
+
+Ports are bound to localhost only, because Grafana runs with anonymous admin access. Grafana comes provisioned with Pyroscope and Tempo data sources, and Tempo's traces-to-profiles setting points at the `gpu_time` profile type with `service.name` mapped to Pyroscope's `service_name`.
+
+To run the agent in Docker too, start the `agent` profile:
+
+```sh
+docker compose -f deploy/docker-compose.yaml --profile agent up -d
+```
+
+## Using your own Collector
+
+OTLP profiles are still alpha in OpenTelemetry. The Collector needs the feature gate, and its profiles pipeline exports with `otlp_grpc` (the plain `otlp` exporter name is deprecated in 0.165):
+
+```yaml
+receivers:
+  otlp:
+    protocols:
+      grpc:
+exporters:
+  otlp_grpc/pyroscope:
+    endpoint: pyroscope:4040
+    tls:
+      insecure: true
+service:
+  pipelines:
+    profiles:
+      receivers: [otlp]
+      exporters: [otlp_grpc/pyroscope]
+```
+
+Start it with `--feature-gates=service.profilesSupport`.
+
+The tested combination is Collector 0.165.0 with Pyroscope 2.4.4. The profiles proto is still changing between releases, so upgrade the Collector and Pyroscope together and check that profiles still arrive.
+
+## Grafana's span button
+
+Grafana shows **Profiles for this span** only on spans that carry the `pyroscope.profile.id` attribute. The bridges set it. If the button is missing on spans that should have kernels, check that the bridge is loaded and that the span was sampled.

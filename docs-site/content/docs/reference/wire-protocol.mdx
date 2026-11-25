@@ -1,0 +1,62 @@
+---
+title: Wire protocol
+description: The messages libwarpspan.so sends to the agent over the unix socket.
+---
+
+The library talks to the node agent over a unix `SOCK_SEQPACKET` socket. The source of truth is `capture/protocol.h` on the C++ side and `agent/wire` on the Go side; they change together.
+
+- SEQPACKET keeps message boundaries: one `send()` is one message, delivered whole or not at all.
+- The library sends with `MSG_DONTWAIT | MSG_NOSIGNAL`. If the agent is busy, the message is dropped and counted. It never blocks the app or kills it with `SIGPIPE`.
+- One connection per process. A closed connection means the process exited.
+- Integers are little-endian. A string is a `u16` length and the bytes, with no terminator.
+- Messages are at most 60 KiB.
+
+## Header
+
+Every message starts with 16 bytes:
+
+| Offset | Type | Field |
+| --- | --- | --- |
+| 0 | u32 | magic `0x4E505357` (`"WSPN"`) |
+| 4 | u16 | version, `1` |
+| 6 | u16 | type: `1` Hello, `2` Kernels |
+| 8 | u32 | payload length after the header |
+| 12 | u32 | pid of the sender, in its own pid namespace |
+
+## Hello
+
+Sent once, right after connecting. The agent closes a connection that sends kernels first, or a second Hello.
+
+```
+u32 count
+count × (str16 key, str16 value)
+```
+
+Keys: `process.executable.name`, `host.name`, and, if set in the app's environment at startup, `env.OTEL_SERVICE_NAME` and `env.OTEL_RESOURCE_ATTRIBUTES`. The agent builds the resource from these.
+
+## Kernels
+
+A batch of finished kernels. Names are mangled, at most 2048 bytes, and stored once per message.
+
+```
+u64 dropped_total     records lost over the process's lifetime
+u32 string_count
+u32 record_count
+string_count × str16
+record_count × 48-byte record
+```
+
+| Offset | Type | Field |
+| --- | --- | --- |
+| 0 | u64 | GPU start, ns |
+| 8 | u64 | GPU end, ns |
+| 16 | u8[16] | trace_id, zero if not linked |
+| 32 | u8[8] | span_id, zero if not linked |
+| 40 | u32 | name index into the strings |
+| 44 | u32 | CUDA device |
+
+A message with bytes left after the last record is rejected. Timestamps are CUPTI's; on the test machine they matched Unix-epoch nanoseconds, which hasn't been checked on other drivers.
+
+## Trust
+
+The socket is world-writable so that apps running as any user can connect. Any local process, or any pod that mounts the socket directory, can send records under any service name or trace ID. The agent checks message structure and sizes and bounds what a client can make it hold, but it doesn't check where data came from. Treat the profiles as being as trustworthy as the workloads on the node.

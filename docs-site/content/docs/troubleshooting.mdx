@@ -1,0 +1,48 @@
+---
+title: Troubleshooting
+description: What the log lines mean and where to look when kernels or spans don't show up.
+---
+
+Start with the line the library prints when the process exits:
+
+```
+warpspan: exiting: N kernels, M linked to spans, D dropped, U not sent (no agent)
+```
+
+## Nothing at all on stderr
+
+The library didn't load. Check that `CUDA_INJECTION64_PATH` is set in the process's own environment (not just your shell) and points at the file, and that the process actually initialises CUDA. With `WARPSPAN_QUIET=1` there are no log lines by design.
+
+## `CUPTI setup failed`
+
+Usually the library was built against a CUDA toolkit newer than the driver supports. Compare `nvidia-smi`'s "CUDA Version" with the toolkit, and rebuild with `make -C capture CUDA_HOME=…` for an older one. CUPTI also refuses when another profiler already holds it.
+
+## N is 0
+
+CUDA initialised but no kernels ran through the hooked launch calls. Check the app really uses the GPU, and run once with `WARPSPAN_DEBUG_FILE=-` to see every kernel the library records.
+
+## M is 0 while the app creates spans
+
+The span bridge isn't active.
+
+- **Python:** `PYTHONPATH` must start with `bridge/python/autoload`. Under `opentelemetry-instrument`, install the package instead (`pip install ./bridge/python`).
+- **C++ or Java:** `Install()` / `install()` ran too late or returned false; its log line says why.
+- **Rust:** look for the warning about no OpenTelemetry span; check the layer order and the `opentelemetry` version.
+- **Go:** only kernels launched inside `Do(ctx, fn)` are linked.
+
+Spans that aren't sampled are never linked, on purpose.
+
+## U is not 0: `not sent (no agent)`
+
+The library couldn't reach the agent. Check the agent runs, that both use the same socket path, and that the path is under 108 bytes. The library retries the connection every two seconds.
+
+## Profiles don't show up in Pyroscope
+
+- The agent's `interval` lines show what it exported. An `export failed` line has the Collector's error.
+- The Collector needs `--feature-gates=service.profilesSupport` and a profiles pipeline.
+- A freshly started Pyroscope can take about a minute before data is queryable.
+- Look under profile type `gpu`, then `gpu_time`.
+
+## No "Profiles for this span" button in Grafana
+
+Grafana shows it only for spans with the `pyroscope.profile.id` attribute, which the bridges set on sampled spans. Check that Tempo's data source has traces-to-profiles pointing at your Pyroscope data source.

@@ -1,0 +1,17 @@
+{
+  "title": "Warpspan",
+  "pages": [
+    "---Get started---",
+    "index",
+    "quickstart",
+    "how-it-works",
+    "---Span bridges---",
+    "...bridges",
+    "---Run it---",
+    "...deploy",
+    "---Help---",
+    "limitations",
+    "troubleshooting",
+    "reference"
+  ]
+}

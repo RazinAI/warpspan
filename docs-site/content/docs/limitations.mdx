@@ -1,0 +1,35 @@
+---
+title: Limitations
+description: What Warpspan doesn't see yet, and where it drops data on purpose.
+---
+
+## What it records
+
+- **Kernels only.** Memory copies and memsets aren't recorded, and there are no CPU or Python stacks: a sample is the device and the kernel name.
+- **Linux x86_64, NVIDIA GPUs.** Tested on one machine with CUDA 13.4 and a CUDA 12.6 build. Other versions from 11.6 up should build but haven't been run.
+
+## Linking kernels to spans
+
+- Linking works per thread and needs a [span bridge](/docs/bridges). Without one, kernels are recorded without a span.
+- Kernels launched from threads the span doesn't reach aren't linked. PyTorch's autograd backward pass, which runs on its own threads, is the common case.
+- In Python before 3.14, asyncio tasks and thread pools running a copied context switch spans without telling the bridge, so their kernels can get the span last attached on that thread. 3.14 fixes this in the main interpreter.
+- When one kernel serves many requests, as in batched serving such as vLLM, it can still carry only one span. How to attribute a batch to its requests isn't designed yet; expect those kernels to show up unlinked.
+
+## Dropping instead of slowing down
+
+Warpspan is meant to stay on in production, so it drops data rather than slow the app:
+
+- when CUPTI's buffers overflow;
+- when the agent is busy or not running;
+- when more than 131,072 launches happen between two flushes: the oldest are still counted but lose their span.
+
+Drops are counted. The exit line on stderr and the agent's `interval` log show them.
+
+## Living with other tools
+
+- CUPTI allows one subscriber per process, so Nsight Systems or `torch.profiler` may fail to attach while Warpspan is active. Use `WARPSPAN_DISABLE=1` for those runs.
+- A process that `fork()`s after CUDA initialisation isn't profiled in the child.
+
+## Security
+
+The agent's socket is world-writable; see [Wire protocol](/docs/reference/wire-protocol#trust).

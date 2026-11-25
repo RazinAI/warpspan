@@ -1,0 +1,45 @@
+---
+title: Python
+description: Loads without code changes, through sitecustomize or opentelemetry-instrument.
+---
+
+The Python bridge wraps `opentelemetry.context`'s runtime context, so every `attach` and `detach` (and so every `start_as_current_span` and `use_span`) publishes the new current span. It needs `opentelemetry-api` 1.20 or newer.
+
+## Loading it
+
+<Tabs items={['PYTHONPATH', 'opentelemetry-instrument']}>
+<Tab value="PYTHONPATH">
+
+Put the bridge's `sitecustomize` first on the path. It installs the bridge when `CUDA_INJECTION64_PATH` is set, then hands over to any other `sitecustomize` on the path.
+
+```sh
+export PYTHONPATH=/path/to/warpspan/bridge/python/autoload:/path/to/warpspan/bridge/python/src
+```
+
+</Tab>
+<Tab value="opentelemetry-instrument">
+
+`opentelemetry-instrument` puts its own `sitecustomize` first and that one doesn't hand over to others, so install the bridge as a package instead. It registers an `opentelemetry_pre_instrument` entry point that `opentelemetry-instrument` calls.
+
+```sh
+pip install /path/to/warpspan/bridge/python
+opentelemetry-instrument python app.py
+```
+
+</Tab>
+</Tabs>
+
+You can also call it yourself: `import warpspan; warpspan.install()`. It returns `True` when the bridge is active and never raises.
+
+## asyncio and thread pools
+
+asyncio runs each task step in the task's own context, and thread pools (FastAPI's sync endpoints, `asyncio.to_thread`, `run_in_executor` with a copied context) run work in a copied context. Neither goes through OpenTelemetry's attach and detach.
+
+- **Python 3.14 and newer**: the bridge registers a context watcher (`PyContext_AddWatcher`), implemented in C inside the library. On every context switch it publishes the span stored in the new context. Each asyncio task's kernels get that task's span, and pool work gets the span of the context it runs in. It costs about 0.1 to 0.2 µs per task step.
+- **Older Pythons**: kernels launched after such a switch get the span last attached on that thread.
+
+The watcher works in the main interpreter only. Sub-interpreters, and gevent or greenlet, behave like older Pythons.
+
+## Checking it
+
+At exit the library prints `warpspan: exiting: N kernels, M linked to spans`. With spans in the app and M at 0, the bridge didn't load: check `PYTHONPATH` or, under `opentelemetry-instrument`, that the package is installed.

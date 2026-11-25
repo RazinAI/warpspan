@@ -1,0 +1,13 @@
+// The docs site, served as static files by a Worker on warpspan.docs.razin.ai
+// (razin.ai is a zone on the same Cloudflare account). Build first:
+//   npm run build && npx wrangler deploy
+{
+  "name": "warpspan-docs",
+  "compatibility_date": "2026-09-01",
+  "assets": {
+    "directory": "./out",
+    "not_found_handling": "404-page",
+    "html_handling": "auto-trailing-slash"
+  },
+  "routes": [{ "pattern": "warpspan.docs.razin.ai", "custom_domain": true }]
+}
