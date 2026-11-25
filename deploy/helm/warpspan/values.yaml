@@ -1,0 +1,67 @@
+# Warpspan agent: one pod per GPU node (DaemonSet). GPU pods on the node send
+# kernel records to it over a unix socket in a hostPath directory; it exports
+# OTLP profiles to your Collector.
+
+image:
+  repository: ghcr.io/razinai/warpspan-agent
+  # Defaults to the chart's appVersion.
+  tag: ""
+  pullPolicy: IfNotPresent
+
+imagePullSecrets: []
+
+otlp:
+  # OTLP/gRPC endpoint of your Collector. http:// is plaintext, https:// or a
+  # bare host:port uses TLS, "none" turns export off.
+  endpoint: http://otel-collector.observability.svc:4317
+  # gRPC metadata sent with every export, e.g. {"authorization": "Bearer …"}.
+  # For secrets, use headersFromSecret instead.
+  headers: {}
+  # An existing Secret with a key holding OTEL_EXPORTER_OTLP_HEADERS
+  # ("k1=v1,k2=v2"). Overrides headers when set.
+  headersFromSecret:
+    name: ""
+    key: headers
+
+# How often the agent exports profiles.
+interval: 10s
+
+# Host directory for the agent's socket. GPU pods mount the same path.
+socketDir: /var/run/warpspan
+
+# Schedule only on GPU nodes. The label is set by NVIDIA's GPU operator and
+# device plugin; change it to match your cluster.
+nodeSelector:
+  nvidia.com/gpu.present: "true"
+
+tolerations:
+  - key: nvidia.com/gpu
+    operator: Exists
+    effect: NoSchedule
+
+affinity: {}
+
+priorityClassName: ""
+
+resources:
+  requests:
+    cpu: 50m
+    memory: 64Mi
+  limits:
+    memory: 256Mi
+
+podAnnotations: {}
+podLabels: {}
+
+securityContext:
+  allowPrivilegeEscalation: false
+  readOnlyRootFilesystem: true
+  capabilities:
+    drop: [ALL]
+
+updateStrategy:
+  type: RollingUpdate
+
+# Shown in the install notes: the image whose init container puts
+# libwarpspan.so into GPU pods. Build it with capture/Dockerfile for your CUDA.
+injectImage: ghcr.io/razinai/warpspan-inject:0.1.0

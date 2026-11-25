@@ -3,7 +3,7 @@ title: Kubernetes
 description: An agent DaemonSet on GPU nodes and an init container that puts the library into each GPU pod.
 ---
 
-`deploy/kubernetes/` has the manual setup. A mutating webhook and a Helm chart that would do this for you don't exist yet.
+The agent installs with a Helm chart. GPU pods still need a few lines added to their spec by hand; a mutating webhook that would add them doesn't exist yet. `deploy/kubernetes/` has the same setup as plain manifests.
 
 ```mermaid
 flowchart LR
@@ -34,13 +34,31 @@ The inject image builds `libwarpspan.so` against the CUDA version you pass, bund
 </Step>
 <Step>
 
-### Run the agent on GPU nodes
-
-Edit the image and `--otlp-endpoint` in `agent-daemonset.yaml`, then apply it. It runs on nodes labelled `nvidia.com/gpu.present`, creates the socket in the host directory `/var/run/warpspan`, and adds `k8s.node.name` to every profile.
+### Install the agent on GPU nodes
 
 ```sh
-kubectl apply -f deploy/kubernetes/agent-daemonset.yaml
+helm install warpspan oci://ghcr.io/razinai/charts/warpspan \
+  --namespace warpspan --create-namespace \
+  --set otlp.endpoint=http://otel-collector.observability.svc:4317
 ```
+
+The chart is private for now: log in first with `helm registry login ghcr.io`
+(a GitHub token with `read:packages`), and give the cluster a pull secret for the
+agent image (`imagePullSecrets` in the values).
+
+The agent runs on nodes labelled `nvidia.com/gpu.present=true` (`nodeSelector` in the values), creates its socket in the host directory `/var/run/warpspan`, and adds `k8s.node.name` to every profile. Useful values:
+
+| Value | Default | |
+| --- | --- | --- |
+| `image.repository`, `image.tag` | `ghcr.io/razinai/warpspan-agent`, the chart's appVersion | the agent image |
+| `otlp.endpoint` | `http://otel-collector.observability.svc:4317` | your Collector |
+| `otlp.headers` | `{}` | gRPC metadata, e.g. an auth header |
+| `otlp.headersFromSecret.name`, `.key` | | the same from a Secret, as `k1=v1,k2=v2` |
+| `interval` | `10s` | export interval |
+| `socketDir` | `/var/run/warpspan` | host directory shared with GPU pods |
+| `nodeSelector`, `tolerations`, `affinity` | GPU nodes | where the agent runs |
+
+Without Helm, edit the image and `--otlp-endpoint` in `deploy/kubernetes/agent-daemonset.yaml` and `kubectl apply` it.
 
 </Step>
 <Step>

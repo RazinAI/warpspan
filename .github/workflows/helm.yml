@@ -1,0 +1,56 @@
+# Lints the Helm chart on every change to it, and on master publishes it to
+# GHCR as an OCI chart: oci://ghcr.io/razinai/charts/warpspan.
+# A version that is already published is never overwritten: bump `version` in
+# deploy/helm/warpspan/Chart.yaml to release.
+name: helm
+
+on:
+  push:
+    branches: [master]
+    paths: ["deploy/helm/**", ".github/workflows/helm.yml"]
+  pull_request:
+    paths: ["deploy/helm/**", ".github/workflows/helm.yml"]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+  packages: write
+
+env:
+  CHART_DIR: deploy/helm/warpspan
+  REGISTRY: oci://ghcr.io/razinai/charts
+
+jobs:
+  chart:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: azure/setup-helm@v4
+        with:
+          version: v3.19.0
+
+      - name: Lint
+        run: |
+          helm lint "$CHART_DIR"
+          helm template ci "$CHART_DIR" > /dev/null
+          helm template ci "$CHART_DIR" --set otlp.headers.authorization=x > /dev/null
+          helm template ci "$CHART_DIR" --set otlp.headersFromSecret.name=s > /dev/null
+
+      - name: Package
+        id: package
+        run: |
+          helm package "$CHART_DIR" --destination dist
+          echo "version=$(helm show chart "$CHART_DIR" | awk '/^version:/ {print $2}')" >> "$GITHUB_OUTPUT"
+
+      - name: Publish
+        if: github.event_name != 'pull_request' && github.ref == 'refs/heads/master'
+        env:
+          VERSION: ${{ steps.package.outputs.version }}
+        run: |
+          echo "${{ secrets.GITHUB_TOKEN }}" | helm registry login ghcr.io -u "${{ github.actor }}" --password-stdin
+          if helm show chart "$REGISTRY/warpspan" --version "$VERSION" > /dev/null 2>&1; then
+            echo "::notice::warpspan $VERSION is already published; bump version in Chart.yaml to release a new one."
+            exit 0
+          fi
+          helm push "dist/warpspan-$VERSION.tgz" "$REGISTRY"

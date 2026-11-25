@@ -1,0 +1,30 @@
+The Warpspan agent runs on nodes matching:
+{{- range $k, $v := .Values.nodeSelector }}
+  {{ $k }}={{ $v }}
+{{- end }}
+and exports profiles to {{ .Values.otlp.endpoint }}.
+
+To profile a GPU workload, add Warpspan to its pod spec. This chart doesn't
+change your pods (a mutating webhook that would do it doesn't exist yet):
+
+  initContainers:
+    - name: warpspan-init
+      image: {{ .Values.injectImage }}
+      volumeMounts:
+        - { name: warpspan, mountPath: /target }
+  containers:
+    - name: your-app
+      env:
+        - { name: CUDA_INJECTION64_PATH, value: /warpspan/libwarpspan.so }
+        - { name: WARPSPAN_SOCKET, value: {{ .Values.socketDir }}/warpspan.sock }
+        - { name: PYTHONPATH, value: /warpspan/python }   # Python apps
+        - { name: OTEL_SERVICE_NAME, value: your-service }
+      volumeMounts:
+        - { name: warpspan, mountPath: /warpspan }
+        - { name: warpspan-run, mountPath: {{ .Values.socketDir }}, readOnly: true }
+  volumes:
+    - { name: warpspan, emptyDir: {} }
+    - { name: warpspan-run, hostPath: { path: {{ .Values.socketDir }} } }
+
+hostPath volumes need the "privileged" Pod Security level in both namespaces.
+Docs: https://warpspan.docs.razin.ai/docs/deploy/kubernetes

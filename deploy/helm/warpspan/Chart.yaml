@@ -1,0 +1,10 @@
+apiVersion: v2
+name: warpspan
+description: Warpspan node agent. Receives CUDA kernel records tagged with OpenTelemetry spans from GPU pods on each node and exports them as OTLP profiles.
+type: application
+version: 0.1.0
+appVersion: "0.1.0"
+home: https://warpspan.docs.razin.ai
+sources:
+  - https://github.com/RazinAI/warpspan
+keywords: [gpu, cuda, opentelemetry, profiling, pyroscope]

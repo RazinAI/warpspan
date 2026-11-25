@@ -146,8 +146,25 @@ writes one line per kernel, including trace/span IDs.
 
 ## Kubernetes
 
-[`deploy/kubernetes/`](deploy/kubernetes/) has the manual setup (the webhook and
-Helm chart that automate it don't exist yet):
+The agent runs as a DaemonSet on GPU nodes, installed with the Helm chart in
+[`deploy/helm/warpspan`](deploy/helm/warpspan/) (published to
+`oci://ghcr.io/razinai/charts/warpspan` by CI on every version bump):
+
+```sh
+helm install warpspan oci://ghcr.io/razinai/charts/warpspan \
+  --namespace warpspan --create-namespace \
+  --set otlp.endpoint=http://otel-collector.observability.svc:4317
+```
+
+The chart is private for now: log in first with `helm registry login ghcr.io`
+(a GitHub token with `read:packages`), and give the cluster a pull secret for the
+agent image (`imagePullSecrets` in the values).
+
+GPU pods still need the init container, volumes and environment variables added
+by hand; `helm install` prints them, and `example-gpu-pod.yaml` shows them in
+full. A mutating webhook that would add them doesn't exist yet.
+
+[`deploy/kubernetes/`](deploy/kubernetes/) has the same setup as plain manifests:
 
 1. Build and push the images:
    - `docker build -f agent/Dockerfile -t <registry>/warpspan-agent:0.1.0 .`
