@@ -190,3 +190,39 @@ func TestParseEndpoint(t *testing.T) {
 		}
 	}
 }
+
+// NVTX labels become frames between the root and the kernel:
+// cuda:0 -> outer range -> inner range -> kernel.
+func TestBuildNvtxStack(t *testing.T) {
+	start := time.Unix(1700000000, 0)
+	labels := []string{"infer s3 f120", "layer conv1"}
+	s := &collect.Snapshot{Start: start, End: start.Add(time.Second), Processes: []collect.ProcessSnapshot{{
+		Process: &collect.Process{PID: 1, Resource: []collect.Attr{{Key: "service.name", Value: "argus"}}},
+		Samples: map[collect.Key]collect.Stat{
+			{Name: "sgemm", Labels: strings.Join(labels, collect.LabelSep)}: {Count: 2, TotalNs: 200},
+			{Name: "sgemm"}: {Count: 1, TotalNs: 100},
+		},
+	}}}
+	req := Build(s, Options{})
+	d := req.Dictionary
+	var stacks [][]string
+	for _, smp := range req.ResourceProfiles[0].ScopeProfiles[0].Profiles[0].Samples {
+		var frames []string
+		for _, li := range d.StackTable[smp.StackIndex].LocationIndices {
+			frames = append(frames, d.StringTable[d.FunctionTable[d.LocationTable[li].Lines[0].FunctionIndex].NameStrindex])
+		}
+		stacks = append(stacks, frames)
+	}
+	want := map[string]bool{
+		"sgemm|cuda:0":                           true,
+		"sgemm|layer conv1|infer s3 f120|cuda:0": true,
+	}
+	if len(stacks) != 2 {
+		t.Fatalf("got %d stacks", len(stacks))
+	}
+	for _, st := range stacks {
+		if !want[strings.Join(st, "|")] {
+			t.Fatalf("unexpected stack (leaf first) %q", st)
+		}
+	}
+}

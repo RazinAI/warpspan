@@ -8,6 +8,7 @@
 #ifndef WARPSPAN_H
 #define WARPSPAN_H
 
+#include <stddef.h>
 #include <stdint.h>
 
 #ifdef __cplusplus
@@ -71,6 +72,14 @@ typedef struct {
  * symbol.
  */
 int warpspan_python_watch(const warpspan_python_api *api);
+
+/*
+ * The calling thread's open NVTX ranges as "outer > inner", written to buf
+ * (NUL-terminated, truncated to size). Returns the number of ranges, or -1
+ * when NVTX isn't routed to this library (NVTX_INJECTION64_PATH unset). Meant
+ * for tests and debugging; look it up as an optional symbol.
+ */
+int warpspan_nvtx_labels(char *buf, size_t size);
 
 #ifdef __cplusplus
 }

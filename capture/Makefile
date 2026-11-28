@@ -42,7 +42,20 @@ libwarpspan.so: warpspan.cpp protocol.h include/warpspan.h exports.map
 compile_flags.txt:
 	printf '%s\n' -xc++ -std=c++17 -I$(CUPTI_INC_DIR) -I$(CUDA_HOME)/include > $@
 
-clean:
-	rm -f libwarpspan.so
+# NVTX label test (no GPU needed): NVTX routes ranges to the library.
+test/nvtx_test: test/nvtx_test.cpp
+	$(CXX) -std=c++17 -O1 -g -Wall -Wextra -I$(CUDA_HOME)/include -o $@ $< -ldl -lpthread
 
-.PHONY: clean compile_flags.txt
+test/nvtx_module.so: test/nvtx_module.cpp
+	$(CXX) -std=c++17 -O1 -g -Wall -Wextra -fPIC -shared -fvisibility=hidden -I$(CUDA_HOME)/include -o $@ $< -ldl
+
+NVTX_TEST_ENV = NVTX_INJECTION64_PATH=$(CURDIR)/libwarpspan.so NVTX_TEST_MODULE=$(CURDIR)/test/nvtx_module.so WARPSPAN_QUIET=1
+
+test: libwarpspan.so test/nvtx_test test/nvtx_module.so
+	$(NVTX_TEST_ENV) ./test/nvtx_test
+	$(NVTX_TEST_ENV) WARPSPAN_NVTX_MAX_LABELS=2 ./test/nvtx_test cap
+
+clean:
+	rm -f libwarpspan.so test/nvtx_test test/nvtx_module.so
+
+.PHONY: clean compile_flags.txt test

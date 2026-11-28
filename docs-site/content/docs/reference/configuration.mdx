@@ -10,6 +10,8 @@ Set in the environment of the app process. The library reads them once, when CUD
 | Variable | Default | |
 | --- | --- | --- |
 | `CUDA_INJECTION64_PATH` | none | Path to `libwarpspan.so`. Setting it is what turns Warpspan on. |
+| `NVTX_INJECTION64_PATH` | none | The same path again records [NVTX ranges](/docs/nvtx) as labels above each kernel. Read by NVTX on the first NVTX call. |
+| `WARPSPAN_NVTX_MAX_LABELS` | `16384` | Most distinct NVTX label paths per process. Past it, new labels are recorded as `(more NVTX labels)`. |
 | `WARPSPAN_SOCKET` | `/var/run/warpspan/warpspan.sock` | The agent's socket. Empty means don't send. Paths over 107 bytes are rejected. |
 | `WARPSPAN_DEBUG_FILE` | none | Also write one text line per kernel here. `-` means stderr. |
 | `WARPSPAN_QUIET` | | `1` turns off the library's log lines on stderr. |

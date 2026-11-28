@@ -8,17 +8,29 @@ import (
 	"encoding/binary"
 	"errors"
 	"fmt"
+	"strings"
 )
 
 const (
-	Magic            uint32 = 0x4E505357 // "WSPN"
-	Version          uint16 = 1
-	HeaderSize              = 16
-	KernelsFixedSize        = 16
-	KernelRecordSize        = 48
-	MaxMessage              = 60 * 1024
-	MaxNameLen              = 2048 // the capture library truncates kernel names to this
+	Magic uint32 = 0x4E505357 // "WSPN"
+	// Version is what the capture library sends. Version 1 (no NVTX labels) is
+	// still accepted, from libraries older than the agent.
+	Version            uint16 = 2
+	HeaderSize                = 16
+	KernelsFixedSizeV1        = 16
+	KernelRecordSizeV1        = 48
+	KernelsFixedSize          = 20
+	KernelRecordSize          = 52
+	NoPath             uint32 = 0xFFFFFFFF // record launched outside any NVTX range
+	MaxMessage                = 60 * 1024
+	MaxNameLen                = 2048 // the capture library truncates kernel names to this
+	MaxNvtxDepth              = 32   // and records at most this many nested NVTX ranges
+	MaxLabelLen               = 256  // and truncates NVTX messages to this
 )
+
+// LabelSep joins Kernel.Labels into Kernel.LabelKey. NVTX messages are C
+// strings, so they can't contain it.
+const LabelSep = "\x00"
 
 // Message types.
 const (
@@ -45,6 +57,12 @@ type Kernel struct {
 	TraceID [16]byte
 	SpanID  [8]byte // all zero: not linked to a span
 	Device  uint32
+	// Labels are the NVTX ranges open on the launching thread, outermost
+	// first. Nil when the app has none or NVTX isn't routed to warpspan.
+	Labels []string
+	// LabelKey is Labels joined with LabelSep, computed once per path. The
+	// collector reads only LabelKey: a producer must set both together.
+	LabelKey string
 }
 
 // Linked reports whether the kernel was launched inside a span.
@@ -75,8 +93,9 @@ func Decode(msg []byte) (any, error) {
 	if m := le.Uint32(msg[0:]); m != Magic {
 		return nil, fmt.Errorf("wire: bad magic %#x", m)
 	}
-	if v := le.Uint16(msg[4:]); v != Version {
-		return nil, fmt.Errorf("wire: unsupported version %d", v)
+	version := le.Uint16(msg[4:])
+	if version != 1 && version != Version {
+		return nil, fmt.Errorf("wire: unsupported version %d", version)
 	}
 	typ := le.Uint16(msg[6:])
 	n := int(le.Uint32(msg[8:]))
@@ -92,7 +111,7 @@ func Decode(msg []byte) (any, error) {
 	case TypeHello:
 		m, err = decodeHello(&r, pid)
 	case TypeKernels:
-		m, err = decodeKernels(&r, pid)
+		m, err = decodeKernels(&r, pid, version)
 	default:
 		return nil, fmt.Errorf("wire: unknown message type %d", typ)
 	}
@@ -114,24 +133,57 @@ func decodeHello(r *reader, pid uint32) (*Hello, error) {
 	return h, r.err
 }
 
-func decodeKernels(r *reader, pid uint32) (*Kernels, error) {
+func decodeKernels(r *reader, pid uint32, version uint16) (*Kernels, error) {
 	k := &Kernels{PID: pid, DroppedTotal: r.u64()}
-	nstrings, nrecords := int(r.u32()), int(r.u32())
+	nstrings := int(r.u32())
+	npaths := 0
+	if version >= 2 {
+		npaths = int(r.u32())
+	}
+	nrecords := int(r.u32())
 	if r.err != nil {
 		return nil, r.err
 	}
+	recordSize := KernelRecordSizeV1
+	if version >= 2 {
+		recordSize = KernelRecordSize
+	}
 	// Counts come from the peer: bound them by the bytes actually present
-	// before allocating (each string takes >= 2 bytes, each record 48).
-	if nstrings*2+nrecords*KernelRecordSize > len(r.b) {
+	// before allocating (each string takes >= 2 bytes, each path >= 2, each
+	// record recordSize).
+	if nstrings*2+npaths*2+nrecords*recordSize > len(r.b) {
 		return nil, ErrShort
 	}
-	names := make([]string, 0, nstrings)
+	strs := make([]string, 0, nstrings)
 	for i := 0; i < nstrings && r.err == nil; i++ {
-		name := r.str16()
-		if len(name) > MaxNameLen {
-			return nil, fmt.Errorf("wire: kernel name of %d bytes exceeds %d", len(name), MaxNameLen)
+		s := r.str16()
+		if len(s) > MaxNameLen {
+			return nil, fmt.Errorf("wire: string of %d bytes exceeds %d", len(s), MaxNameLen)
 		}
-		names = append(names, name)
+		strs = append(strs, s)
+	}
+	paths := make([][]string, 0, npaths)
+	pathKeys := make([]string, 0, npaths)
+	for i := 0; i < npaths && r.err == nil; i++ {
+		depth := int(r.u16())
+		if depth == 0 || depth > MaxNvtxDepth {
+			return nil, fmt.Errorf("wire: NVTX path depth %d out of range", depth)
+		}
+		p := make([]string, 0, depth)
+		for j := 0; j < depth && r.err == nil; j++ {
+			idx := int(r.u32())
+			if r.err == nil && idx >= len(strs) {
+				return nil, fmt.Errorf("wire: label index %d out of range (%d strings)", idx, len(strs))
+			}
+			if r.err == nil {
+				if len(strs[idx]) > MaxLabelLen {
+					return nil, fmt.Errorf("wire: NVTX label of %d bytes exceeds %d", len(strs[idx]), MaxLabelLen)
+				}
+				p = append(p, strs[idx])
+			}
+		}
+		paths = append(paths, p)
+		pathKeys = append(pathKeys, strings.Join(p, LabelSep))
 	}
 	k.Records = make([]Kernel, 0, nrecords)
 	for i := 0; i < nrecords && r.err == nil; i++ {
@@ -142,13 +194,24 @@ func decodeKernels(r *reader, pid uint32) (*Kernels, error) {
 		r.bytes(rec.SpanID[:])
 		nameIdx := int(r.u32())
 		rec.Device = r.u32()
+		pathIdx := NoPath
+		if version >= 2 {
+			pathIdx = r.u32()
+		}
 		if r.err != nil {
 			break
 		}
-		if nameIdx >= len(names) {
-			return nil, fmt.Errorf("wire: name index %d out of range (%d names)", nameIdx, len(names))
+		if nameIdx >= len(strs) {
+			return nil, fmt.Errorf("wire: name index %d out of range (%d strings)", nameIdx, len(strs))
 		}
-		rec.Name = names[nameIdx]
+		rec.Name = strs[nameIdx]
+		if pathIdx != NoPath {
+			if int64(pathIdx) >= int64(len(paths)) {
+				return nil, fmt.Errorf("wire: path index %d out of range (%d paths)", pathIdx, len(paths))
+			}
+			rec.Labels = paths[pathIdx]
+			rec.LabelKey = pathKeys[pathIdx]
+		}
 		k.Records = append(k.Records, rec)
 	}
 	return k, r.err

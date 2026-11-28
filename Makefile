@@ -20,6 +20,7 @@ MAVEN_JARS ?= $(HOME)/.cache/warpspan-deps/maven
 OTEL_JAVA_VERSION ?= 1.68.0
 
 test: capture
+	$(MAKE) -C capture test
 	go vet ./...
 	go test -race ./...
 	cd bridge/python && $(PYTHON) -m pytest -q

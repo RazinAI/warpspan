@@ -5,7 +5,8 @@ description: What Warpspan doesn't see yet, and where it drops data on purpose.
 
 ## What it records
 
-- **Kernels only.** Memory copies and memsets aren't recorded, and there are no CPU or Python stacks: a sample is the device and the kernel name.
+- **Kernels only.** Memory copies and memsets aren't recorded, and there are no CPU or Python stacks: a sample is the device, the [NVTX ranges](/docs/nvtx) open at launch if NVTX is routed to Warpspan, and the kernel name.
+- **NVTX:** only push/pop ranges, per thread, up to 32 levels and 16384 distinct label paths per process; past that, new labels show as `(more NVTX labels)` for the rest of the process's life. `nvtxRangeStart`/`End`, marks and payloads are ignored, and ranges of different domains share one stack.
 - **Linux x86_64, NVIDIA GPUs.** Tested on one machine with CUDA 13.4 and a CUDA 12.6 build. Other versions from 11.6 up should build but haven't been run.
 
 ## Linking kernels to spans

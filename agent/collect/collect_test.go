@@ -120,3 +120,55 @@ func TestCollectorCapsUnlinkedNames(t *testing.T) {
 		t.Fatalf("samples=%d other=%d", len(p.Samples), p.Samples[Key{Name: OtherKernels}].Count)
 	}
 }
+
+func TestCollectorLabels(t *testing.T) {
+	c := New(nil)
+	c.Hello(1, &wire.Hello{PID: 1})
+	c.Add(1, &wire.Kernels{Records: []wire.Kernel{
+		{Name: "k", EndNs: 10, Labels: []string{"infer", "layer 1"}, LabelKey: "infer" + LabelSep + "layer 1"},
+		{Name: "k", EndNs: 10, Labels: []string{"infer", "layer 1"}, LabelKey: "infer" + LabelSep + "layer 1"},
+		{Name: "k", EndNs: 10, Labels: []string{"infer"}, LabelKey: "infer"},
+		{Name: "k", EndNs: 10},
+	}})
+	p := c.Snapshot(time.Now()).Processes[0]
+	if len(p.Samples) != 3 {
+		t.Fatalf("want 3 samples (two label paths and none), got %d", len(p.Samples))
+	}
+	k := Key{Name: "k", Labels: "infer" + LabelSep + "layer 1"}
+	if p.Samples[k].Count != 2 || p.Samples[k].TotalNs != 20 {
+		t.Fatalf("labelled sample %+v", p.Samples[k])
+	}
+	if got := k.LabelList(); len(got) != 2 || got[0] != "infer" || got[1] != "layer 1" {
+		t.Fatalf("LabelList %q", got)
+	}
+	if (Key{Name: "k"}).LabelList() != nil {
+		t.Fatal("no labels should give nil")
+	}
+}
+
+// Per-call labels ("infer f120", "infer f121", ...) can make thousands of keys.
+// Past the soft cap the labels are dropped and the kernel name is kept.
+func TestCollectorCapsLabels(t *testing.T) {
+	c := New(nil)
+	c.Hello(1, &wire.Hello{PID: 1})
+	var recs []wire.Kernel
+	for i := 0; i < MaxKeysPerProcess+10; i++ {
+		l := fmt.Sprintf("infer f%d", i)
+		recs = append(recs, wire.Kernel{Name: "sgemm", EndNs: 1, Labels: []string{l}, LabelKey: l})
+	}
+	recs = append(recs, wire.Kernel{Name: "nms", EndNs: 1, Labels: []string{"late"}, LabelKey: "late"})
+	c.Add(1, &wire.Kernels{Records: recs})
+	p := c.Snapshot(time.Now()).Processes[0]
+	if len(p.Samples) != MaxKeysPerProcess+2 {
+		t.Fatalf("samples=%d", len(p.Samples))
+	}
+	if n := p.Samples[Key{Name: "sgemm"}].Count; n != 10 {
+		t.Fatalf("bare sgemm count %d, want 10", n)
+	}
+	if n := p.Samples[Key{Name: "nms"}].Count; n != 1 {
+		t.Fatalf("bare nms count %d, want 1 (names survive the labels)", n)
+	}
+	if p.Samples[Key{Name: OtherKernels}].Count != 0 {
+		t.Fatal("nothing should reach OtherKernels")
+	}
+}

@@ -9,6 +9,8 @@
     warpspan_get_span;
     warpspan_flush;
     warpspan_python_watch;
+    InitializeInjectionNvtx2;
+    warpspan_nvtx_labels;
   local:
     *;
 };

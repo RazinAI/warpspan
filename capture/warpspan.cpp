@@ -14,18 +14,30 @@
 //   4. Joined records are batched and sent to the agent over a unix
 //      SOCK_SEQPACKET socket, non-blocking; dropped if the agent is busy.
 //
+// NVTX labels: when NVTX_INJECTION64_PATH also points at this .so, NVTX calls
+// InitializeInjectionNvtx2 and routes nvtxRangePush/Pop (and the domain
+// versions) here. Each thread keeps its stack of open ranges as one interned
+// "label path" id; a launch records that id next to the span, and the agent
+// turns the path into flame graph frames above the kernel. Interning a label
+// takes a lock and may allocate, on the app thread that pushes the range; the
+// launch path still only stores one more word.
+//
 // This code runs inside other people's processes: no exceptions, no allocation
 // or locks on the launch path, no getenv() after initialisation (it races with
 // the app's setenv()), logging only to stderr. One exception: the library is
 // dlopen()ed, so glibc allocates its thread_local block lazily, on a thread's
-// first launch or span change. -ftls-model=initial-exec would avoid that, but
-// dlopen() then fails when the static TLS reserve is used up.
+// first launch, span change or NVTX range. -ftls-model=initial-exec would avoid
+// that, but dlopen() then fails when the static TLS reserve is used up.
 
 #include "include/warpspan.h"
 #include "protocol.h"
 
 #include <cupti.h>
+// Tool side of NVTX: declarations and callback ids only, no NVTX client code.
+#define NVTX_NO_IMPL
+#include <nvtx3/nvToolsExt.h>
 
+#include <algorithm>
 #include <atomic>
 #include <cerrno>
 #include <cstdarg>
@@ -33,9 +45,12 @@
 #include <cstdlib>
 #include <cstring>
 #include <ctime>
+#include <cwchar>
+#include <deque>
 #include <mutex>
 #include <new>
 #include <string>
+#include <string_view>
 #include <unordered_map>
 #include <vector>
 
@@ -94,13 +109,260 @@ struct SpanCtx {
 thread_local SpanCtx t_span{};
 
 // ---------------------------------------------------------------------------
-// Launch table: correlation_id -> span. Direct-mapped ring written by app
-// threads at launch and read by the activity thread. Each slot is a seqlock:
-// the writer clears corr, writes the span, then publishes corr; the reader
-// accepts the span only if corr is the same before and after reading it.
+// NVTX label paths.
+//
+// A label path is a node in a tree: (parent path, label). Node 0 is the root
+// (no open range). Nodes are interned process-wide and never freed, so a path
+// id stays valid for kernels still in flight. Labels that differ per call
+// ("infer s3 f120") make a new node each time; past max_paths new ranges are
+// not recorded (their kernels go under the enclosing range) and counted.
+
+constexpr uint32_t kRootPath = 0;
+constexpr uint32_t kDefaultMaxPaths = 16384;
+constexpr size_t kMaxRegistered = 4096;  // distinct registered strings and domains
+constexpr size_t kKeyPrefix = sizeof(uint32_t);
+constexpr const char *kOverflowLabel = "(more NVTX labels)";
+
+// The node's key is the 4 parent bytes followed by the label; the map's
+// string_views point into it. Never modified after insertion, and the deque
+// never moves nodes, so views and label pointers stay valid.
+struct LabelNode {
+  uint32_t parent;
+  bool overflow;  // stands for the labels that didn't fit under parent
+  std::string key;
+  const char *label() const { return key.data() + kKeyPrefix; }
+  size_t label_len() const { return key.size() - kKeyPrefix; }
+};
+
+// Registered strings and domains are handles we hand out, interned by text.
+struct NvtxString {
+  std::string text;
+};
+
+struct Labels {
+  std::mutex mu;
+  std::deque<LabelNode> nodes;  // index = path id
+  std::unordered_map<std::string_view, uint32_t> index;
+  uint32_t max_paths = kDefaultMaxPaths + 1;  // + the root
+  std::atomic<uint64_t> dropped{0};           // ranges recorded as kOverflowLabel
+
+  std::mutex reg_mu;  // registered strings and domains
+  std::unordered_map<std::string, NvtxString *> registered;
+  NvtxString too_many{"(too many registered NVTX strings)"};
+};
+
+// Set once by the first InitializeInjectionNvtx2 and never freed. Atomic: the
+// activity thread may already be reading it when NVTX initialises.
+std::atomic<Labels *> g_labels_ptr{nullptr};
+inline Labels *labels() { return g_labels_ptr.load(std::memory_order_acquire); }
+
+uint32_t add_node_locked(Labels *L, uint32_t parent, bool overflow, std::string key) {
+  const uint32_t id = static_cast<uint32_t>(L->nodes.size());
+  L->nodes.push_back(LabelNode{parent, overflow, std::move(key)});
+  const LabelNode &n = L->nodes.back();
+  L->index.emplace(std::string_view(n.key), id);
+  return id;
+}
+
+// Interns (parent, label). No thread_local buffers: this also runs from static
+// and TLS destructors at exit, after the thread's TLS objects are gone. Past
+// max_paths, new labels under a parent share one "(more NVTX labels)" node, so
+// the table holds at most about twice max_paths nodes.
+uint32_t intern_label(uint32_t parent, const char *text, size_t len) {
+  Labels *L = labels();
+  char buf[kKeyPrefix + wire::kMaxLabelLen];
+  len = std::min(len, wire::kMaxLabelLen);
+  std::memcpy(buf, &parent, kKeyPrefix);
+  std::memcpy(buf + kKeyPrefix, text, len);
+  const std::string_view key(buf, kKeyPrefix + len);
+  bool first_overflow = false;
+  uint32_t id;
+  {
+    std::lock_guard<std::mutex> lock(L->mu);
+    auto it = L->index.find(key);
+    if (it != L->index.end()) return it->second;
+    if (L->nodes.size() < L->max_paths) return add_node_locked(L, parent, false, std::string(key));
+    first_overflow = L->dropped.fetch_add(1, std::memory_order_relaxed) == 0;
+    if (L->nodes[parent].overflow) {
+      id = parent;  // already inside an overflow node: don't nest them
+    } else {
+      // Steady state for per-call labels once full: look up without allocating.
+      // (An app label spelled exactly like kOverflowLabel would be found here
+      // too; harmless, it only changes where the overflow kernels show up.)
+      char obuf[kKeyPrefix + 32];
+      const size_t olen = std::strlen(kOverflowLabel);
+      std::memcpy(obuf, &parent, kKeyPrefix);
+      std::memcpy(obuf + kKeyPrefix, kOverflowLabel, olen);
+      const std::string_view okey(obuf, kKeyPrefix + olen);
+      auto oit = L->index.find(okey);
+      id = oit != L->index.end() ? oit->second : add_node_locked(L, parent, true, std::string(okey));
+    }
+  }
+  if (first_overflow)
+    log("more than %u distinct NVTX label paths; new ones are recorded as \"%s\" "
+        "(raise WARPSPAN_NVTX_MAX_LABELS)",
+        L->max_paths - 1, kOverflowLabel);
+  return id;
+}
+
+// Returns the handle for text (same text, same handle), at most kMaxRegistered.
+NvtxString *register_string(std::string text) {
+  Labels *L = labels();
+  if (!L) return nullptr;
+  std::lock_guard<std::mutex> lock(L->reg_mu);
+  auto it = L->registered.find(text);
+  if (it != L->registered.end()) return it->second;
+  // Past the cap every new string or domain shares one handle. Domains only
+  // need identity for pops, and all domains share the thread's stack anyway.
+  if (L->registered.size() >= kMaxRegistered) return &L->too_many;
+  auto *s = new (std::nothrow) NvtxString{text};
+  if (!s) return &L->too_many;
+  L->registered.emplace(std::move(text), s);
+  return s;
+}
+
+std::string narrow(const wchar_t *w) {
+  std::string out;
+  for (; w && *w && out.size() < wire::kMaxLabelLen; w++) out.push_back((*w > 0 && *w < 0x80) ? static_cast<char>(*w) : '?');
+  return out;
+}
+
+// One open range on a thread. domain is the NVTX domain handle (null for the
+// default domain); ranges of different domains share the stack.
+struct NvtxFrame {
+  const void *domain;
+  uint32_t path;
+};
+
+struct NvtxStack {
+  NvtxFrame f[wire::kMaxNvtxDepth];
+  int depth = 0;
+  int overflow = 0;  // ranges pushed past kMaxNvtxDepth, not recorded
+};
+
+thread_local NvtxStack t_nvtx;
+thread_local uint32_t t_path = kRootPath;  // read at every launch
+
+// Copies an NVTX message into buf (ASCII; other characters become '?').
+size_t nvtx_message(const nvtxEventAttributes_t *attr, char *buf) {
+  if (!attr) return 0;
+  const size_t max = wire::kMaxLabelLen;
+  switch (attr->messageType) {
+    case NVTX_MESSAGE_TYPE_ASCII:
+      if (attr->message.ascii) {
+        size_t n = strnlen(attr->message.ascii, max);
+        std::memcpy(buf, attr->message.ascii, n);
+        return n;
+      }
+      return 0;
+    case NVTX_MESSAGE_TYPE_UNICODE: {
+      size_t n = 0;
+      for (const wchar_t *w = attr->message.unicode; w && *w && n < max; w++)
+        buf[n++] = (*w > 0 && *w < 0x80) ? static_cast<char>(*w) : '?';
+      return n;
+    }
+    case NVTX_MESSAGE_TYPE_REGISTERED:
+      if (attr->message.registered) {
+        const auto *s = reinterpret_cast<const NvtxString *>(attr->message.registered);
+        size_t n = std::min(s->text.size(), max);
+        std::memcpy(buf, s->text.data(), n);
+        return n;
+      }
+      return 0;
+    default:
+      return 0;
+  }
+}
+
+int nvtx_push(const void *domain, const char *text, size_t len) {
+  NvtxStack &s = t_nvtx;
+  if (s.depth >= wire::kMaxNvtxDepth) return s.depth + s.overflow++;
+  const uint32_t parent = s.depth ? s.f[s.depth - 1].path : kRootPath;
+  if (len == 0) text = "(unnamed range)", len = std::strlen(text);
+  const uint32_t id = intern_label(parent, text, len);
+  s.f[s.depth++] = NvtxFrame{domain, id};
+  t_path = id;
+  return s.depth - 1;
+}
+
+int nvtx_push_attr(const void *domain, const nvtxEventAttributes_t *attr) {
+  char buf[wire::kMaxLabelLen];
+  return nvtx_push(domain, buf, nvtx_message(attr, buf));
+}
+
+int nvtx_pop(const void *domain) {
+  NvtxStack &s = t_nvtx;
+  if (s.overflow > 0) return s.depth + --s.overflow;
+  int i = s.depth - 1;
+  while (i >= 0 && s.f[i].domain != domain) i--;  // usually the top
+  if (i < 0) return -1;
+  // Ranges of other domains above the popped one get re-parented.
+  for (int j = i; j + 1 < s.depth; j++) {
+    const uint32_t old_parent = s.f[j].path, old_id = s.f[j + 1].path;
+    const uint32_t parent = j ? s.f[j - 1].path : kRootPath;
+    uint32_t id = parent;
+    if (old_id != old_parent) {  // equal: the range wasn't recorded (table full)
+      char label[wire::kMaxLabelLen];
+      size_t len;
+      {
+        Labels *L = labels();
+        std::lock_guard<std::mutex> lock(L->mu);
+        const LabelNode &n = L->nodes[old_id];
+        len = std::min(n.label_len(), sizeof label);
+        std::memcpy(label, n.label(), len);
+      }
+      id = intern_label(parent, label, len);
+    }
+    s.f[j] = NvtxFrame{s.f[j + 1].domain, id};
+  }
+  s.depth--;
+  t_path = s.depth ? s.f[s.depth - 1].path : kRootPath;
+  return s.depth;
+}
+
+// NVTX entry points (signatures from nvToolsExt.h).
+int NVTX_API on_nvtx_range_push_ex(const nvtxEventAttributes_t *attr) { return nvtx_push_attr(nullptr, attr); }
+int NVTX_API on_nvtx_range_push_a(const char *message) {
+  return nvtx_push(nullptr, message ? message : "", message ? strnlen(message, wire::kMaxLabelLen) : 0);
+}
+int NVTX_API on_nvtx_range_push_w(const wchar_t *message) {
+  nvtxEventAttributes_t attr{};
+  attr.messageType = NVTX_MESSAGE_TYPE_UNICODE;
+  attr.message.unicode = message;
+  return nvtx_push_attr(nullptr, &attr);
+}
+int NVTX_API on_nvtx_range_pop() { return nvtx_pop(nullptr); }
+int NVTX_API on_nvtx_domain_range_push_ex(nvtxDomainHandle_t domain, const nvtxEventAttributes_t *attr) {
+  return nvtx_push_attr(domain, attr);
+}
+int NVTX_API on_nvtx_domain_range_pop(nvtxDomainHandle_t domain) { return nvtx_pop(domain); }
+
+// Domains only need distinct handles; registered strings carry their text.
+// Both are interned by text, so apps that register per call don't leak.
+nvtxDomainHandle_t NVTX_API on_nvtx_domain_create_a(const char *name) {
+  return reinterpret_cast<nvtxDomainHandle_t>(
+      register_string(std::string("\x01domain:") + (name ? std::string(name, strnlen(name, wire::kMaxLabelLen)) : "")));
+}
+nvtxDomainHandle_t NVTX_API on_nvtx_domain_create_w(const wchar_t *name) {
+  return reinterpret_cast<nvtxDomainHandle_t>(register_string("\x01domain:" + narrow(name)));
+}
+nvtxStringHandle_t NVTX_API on_nvtx_register_string_a(nvtxDomainHandle_t, const char *text) {
+  return reinterpret_cast<nvtxStringHandle_t>(
+      register_string(text ? std::string(text, strnlen(text, wire::kMaxLabelLen)) : std::string()));
+}
+nvtxStringHandle_t NVTX_API on_nvtx_register_string_w(nvtxDomainHandle_t, const wchar_t *text) {
+  return reinterpret_cast<nvtxStringHandle_t>(register_string(narrow(text)));
+}
+
+// ---------------------------------------------------------------------------
+// Launch table: correlation_id -> span and NVTX path. Direct-mapped ring
+// written by app threads at launch and read by the activity thread. Each slot
+// is a seqlock: the writer clears corr, writes the span, then publishes corr;
+// the reader accepts the span only if corr is the same before and after.
 
 struct LaunchSlot {
   std::atomic<uint32_t> corr;
+  std::atomic<uint32_t> path;  // fills what was padding: the slot stays 32 bytes
   std::atomic<uint64_t> w[3];
 };
 
@@ -111,16 +373,19 @@ inline void record_launch(uint32_t corr) {
   // A runtime launch can also fire the driver callback with the same id.
   if (slot.corr.load(std::memory_order_relaxed) == corr) return;
   const SpanCtx s = t_span;
+  const uint32_t path = t_path;
   slot.corr.store(0, std::memory_order_relaxed);
   std::atomic_thread_fence(std::memory_order_release);
   for (int i = 0; i < 3; i++) slot.w[i].store(s.w[i], std::memory_order_relaxed);
+  slot.path.store(path, std::memory_order_relaxed);
   slot.corr.store(corr, std::memory_order_release);
 }
 
-bool lookup_launch(uint32_t corr, SpanCtx *span) {
+bool lookup_launch(uint32_t corr, SpanCtx *span, uint32_t *path) {
   LaunchSlot &slot = g_launches[corr & (kLaunchSlots - 1)];
   if (slot.corr.load(std::memory_order_acquire) != corr) return false;
   for (int i = 0; i < 3; i++) span->w[i] = slot.w[i].load(std::memory_order_relaxed);
+  *path = slot.path.load(std::memory_order_relaxed);
   std::atomic_thread_fence(std::memory_order_acquire);
   return slot.corr.load(std::memory_order_relaxed) == corr;
 }
@@ -204,9 +469,11 @@ struct State {
   int fd = -1;
   uint64_t last_connect_attempt_ms = 0;
   bool logged_connect_failure = false;
-  Bytes strings, records;
-  uint32_t string_count = 0, record_count = 0;
-  std::unordered_map<const char *, uint32_t> string_index;  // CUPTI's name pointer -> index
+  Bytes strings, paths, records;
+  uint32_t string_count = 0, path_count = 0, record_count = 0;
+  // CUPTI's name pointers and label c_str()s -> string index in this message.
+  std::unordered_map<const char *, uint32_t> string_index;
+  std::unordered_map<uint32_t, uint32_t> path_index;  // label path id -> path index in this message
 };
 
 State *g = nullptr;
@@ -265,40 +532,107 @@ void connect_locked() {
 void flush_batch_locked() {
   if (g->record_count > 0) {
     Bytes msg;
-    const size_t payload_len = wire::kKernelsFixedSize + g->strings.buf.size() + g->records.buf.size();
+    const size_t payload_len =
+        wire::kKernelsFixedSize + g->strings.buf.size() + g->paths.buf.size() + g->records.buf.size();
     msg.buf.reserve(wire::kHeaderSize + payload_len);
     put_header(msg, wire::kKernels, payload_len);
     msg.u64(g->dropped.load(std::memory_order_relaxed));
     msg.u32(g->string_count);
+    msg.u32(g->path_count);
     msg.u32(g->record_count);
     msg.raw(g->strings.buf.data(), g->strings.buf.size());
+    msg.raw(g->paths.buf.data(), g->paths.buf.size());
     msg.raw(g->records.buf.data(), g->records.buf.size());
     if (!send_locked(msg)) g->dropped.fetch_add(g->record_count, std::memory_order_relaxed);
   }
   g->strings.buf.clear();
+  g->paths.buf.clear();
   g->records.buf.clear();
-  g->string_count = g->record_count = 0;
+  g->string_count = g->path_count = g->record_count = 0;
   g->string_index.clear();
+  g->path_index.clear();
 }
 
-void add_kernel_locked(const char *name, uint64_t start, uint64_t end, uint32_t device, const SpanCtx &span) {
-  if (!name) name = "<unknown kernel>";
-  auto it = g->string_index.find(name);
-  size_t name_len = it == g->string_index.end() ? strnlen(name, wire::kMaxStringLen) : 0;
-  size_t need = wire::kKernelRecordSize + (it == g->string_index.end() ? 2 + name_len : 0);
-  if (wire::kHeaderSize + wire::kKernelsFixedSize + g->strings.buf.size() + g->records.buf.size() + need >
-      wire::kMaxMessage) {
-    flush_batch_locked();
-    it = g->string_index.end();
-    name_len = strnlen(name, wire::kMaxStringLen);
+// The labels of a path, outermost first. Label strings live as long as the
+// process, so the pointers stay valid after the lock is released.
+struct LabelChain {
+  const char *text[wire::kMaxNvtxDepth];
+  size_t len[wire::kMaxNvtxDepth];
+  int depth = 0;
+};
+
+void label_chain(uint32_t path, LabelChain *c) {
+  c->depth = 0;
+  Labels *L = labels();
+  if (path == kRootPath || !L) return;
+  std::lock_guard<std::mutex> lock(L->mu);
+  const char *rev[wire::kMaxNvtxDepth];
+  size_t rlen[wire::kMaxNvtxDepth];
+  int n = 0;
+  for (uint32_t id = path; id != kRootPath && id < L->nodes.size() && n < wire::kMaxNvtxDepth;) {
+    const LabelNode &node = L->nodes[id];
+    rev[n] = node.label();
+    rlen[n] = node.label_len();
+    n++;
+    id = node.parent;
   }
-  uint32_t name_index;
-  if (it == g->string_index.end()) {
-    name_index = g->string_count++;
-    g->strings.str16(name, name_len);
-    g->string_index.emplace(name, name_index);
-  } else {
-    name_index = it->second;
+  for (int i = 0; i < n; i++) {
+    c->text[i] = rev[n - 1 - i];
+    c->len[i] = rlen[n - 1 - i];
+  }
+  c->depth = n;
+}
+
+uint32_t add_string_locked(const char *s, size_t len) {
+  auto it = g->string_index.find(s);
+  if (it != g->string_index.end()) return it->second;
+  const uint32_t i = g->string_count++;
+  g->strings.str16(s, len);
+  g->string_index.emplace(s, i);
+  return i;
+}
+
+// Bytes a record adds to the current message, counting strings and the path
+// only if this message doesn't have them yet.
+size_t record_need_locked(const char *name, size_t name_len, uint32_t path, const LabelChain &chain) {
+  size_t need = wire::kKernelRecordSize;
+  if (!g->string_index.count(name)) need += 2 + name_len;
+  if (chain.depth > 0 && !g->path_index.count(path)) {
+    need += 2 + 4 * static_cast<size_t>(chain.depth);
+    for (int i = 0; i < chain.depth; i++)
+      if (!g->string_index.count(chain.text[i])) need += 2 + chain.len[i];
+  }
+  return need;
+}
+
+void add_kernel_locked(const char *name, uint64_t start, uint64_t end, uint32_t device, const SpanCtx &span,
+                       uint32_t path) {
+  if (!name) name = "<unknown kernel>";
+  const size_t name_len = strnlen(name, wire::kMaxStringLen);
+  // Most kernels repeat a path already in this message: then the label store
+  // (and its lock) isn't touched.
+  bool known = path != kRootPath && g->path_index.count(path);
+  LabelChain chain;
+  if (path != kRootPath && !known) label_chain(path, &chain);
+  const size_t used = wire::kHeaderSize + wire::kKernelsFixedSize + g->strings.buf.size() + g->paths.buf.size() +
+                      g->records.buf.size();
+  if (used + record_need_locked(name, name_len, path, chain) > wire::kMaxMessage) {
+    flush_batch_locked();
+    if (known) label_chain(path, &chain);
+    known = false;
+  }
+
+  const uint32_t name_index = add_string_locked(name, name_len);
+  uint32_t path_index = wire::kNoPath;
+  if (known) {
+    path_index = g->path_index.find(path)->second;
+  } else if (chain.depth > 0) {
+    uint32_t idx[wire::kMaxNvtxDepth];
+    for (int i = 0; i < chain.depth; i++) idx[i] = add_string_locked(chain.text[i], chain.len[i]);
+    g->paths.u16(static_cast<uint16_t>(chain.depth));
+    for (int i = 0; i < chain.depth; i++) g->paths.u32(idx[i]);
+    path_index = g->path_count++;
+    g->path_index.emplace(path, path_index);
   }
 
   Bytes &r = g->records;
@@ -307,11 +641,12 @@ void add_kernel_locked(const char *name, uint64_t start, uint64_t end, uint32_t 
   r.raw(span.w, sizeof span.w);  // trace_id[16] + span_id[8], zero if unlinked
   r.u32(name_index);
   r.u32(device);
+  r.u32(path_index);
   g->record_count++;
 }
 
 void debug_kernel(const char *name, uint64_t start, uint64_t end, uint32_t corr, uint32_t device,
-                  const SpanCtx &span, bool linked) {
+                  const SpanCtx &span, bool linked, uint32_t path) {
   char ids[80] = "trace_id=- span_id=-";  // linked: 9 + 32 + 9 + 16 + NUL = 67 bytes
   if (linked) {
     uint8_t b[24];
@@ -321,9 +656,18 @@ void debug_kernel(const char *name, uint64_t start, uint64_t end, uint32_t corr,
     o += std::snprintf(ids + o, sizeof ids - o, " span_id=");
     for (int i = 16; i < 24; i++) o += std::snprintf(ids + o, sizeof ids - o, "%02x", b[i]);
   }
-  std::fprintf(g->debug, "kernel name=%s start_ns=%llu end_ns=%llu duration_ns=%llu correlation_id=%u device=%u %s\n",
+  std::fprintf(g->debug, "kernel name=%s start_ns=%llu end_ns=%llu duration_ns=%llu correlation_id=%u device=%u %s",
                name ? name : "<unknown kernel>", static_cast<unsigned long long>(start),
                static_cast<unsigned long long>(end), static_cast<unsigned long long>(end - start), corr, device, ids);
+  LabelChain chain;
+  label_chain(path, &chain);
+  if (chain.depth > 0) {
+    std::fputs(" nvtx=\"", g->debug);
+    for (int i = 0; i < chain.depth; i++)
+      std::fprintf(g->debug, "%s%.*s", i ? " > " : "", static_cast<int>(chain.len[i]), chain.text[i]);
+    std::fputc('"', g->debug);
+  }
+  std::fputc('\n', g->debug);
 }
 
 // ---------------------------------------------------------------------------
@@ -364,13 +708,16 @@ void CUPTIAPI on_buffer_completed(CUcontext ctx, uint32_t stream_id, uint8_t *bu
       // shipped works with CUDA 11, 12 and 13.
       const auto *k = reinterpret_cast<const CUpti_ActivityKernel4 *>(rec);
       SpanCtx span{};
-      const bool linked = lookup_launch(k->correlationId, &span) && span.valid();
+      uint32_t path = kRootPath;
+      const bool found = lookup_launch(k->correlationId, &span, &path);
+      if (!found) path = kRootPath;
+      const bool linked = found && span.valid();
       if (!linked) span = SpanCtx{};
       g->kernels.fetch_add(1, std::memory_order_relaxed);
       if (linked) g->kernels_linked.fetch_add(1, std::memory_order_relaxed);
-      if (g->debug) debug_kernel(k->name, k->start, k->end, k->correlationId, k->deviceId, span, linked);
+      if (g->debug) debug_kernel(k->name, k->start, k->end, k->correlationId, k->deviceId, span, linked, path);
       if (connected) {
-        add_kernel_locked(k->name, k->start, k->end, k->deviceId, span);
+        add_kernel_locked(k->name, k->start, k->end, k->deviceId, span, path);
       } else {
         g->unsent.fetch_add(1, std::memory_order_relaxed);
       }
@@ -478,6 +825,9 @@ void on_exit() {
   log("exiting: %llu kernels, %llu linked to spans, %llu dropped, %llu not sent (no agent)",
       static_cast<unsigned long long>(g->kernels.load()), static_cast<unsigned long long>(g->kernels_linked.load()),
       static_cast<unsigned long long>(g->dropped.load()), static_cast<unsigned long long>(g->unsent.load()));
+  if (Labels *L = labels(); L && L->dropped.load() > 0)
+    log("%llu NVTX range pushes recorded as \"(more NVTX labels)\": more than %u distinct label paths",
+        static_cast<unsigned long long>(L->dropped.load()), L->max_paths - 1);
 }
 
 void on_fork_child() {
@@ -599,4 +949,96 @@ WARPSPAN_EXPORT int InitializeInjection(void) {
   log("loaded (pid %d, agent socket %s)", static_cast<int>(getpid()),
       g->socket_path.empty() ? "<none>" : g->socket_path.c_str());
   return 1;
+}
+
+// Called by NVTX when NVTX_INJECTION64_PATH points at this library: once per
+// module that uses NVTX (each shared library or executable compiled with the
+// header-only NVTX keeps its own state; TensorRT and the app both call this).
+// Return 1 to attach to that module.
+namespace {
+std::mutex g_nvtx_init_mu;  // file scope: also held across fork()
+}
+
+WARPSPAN_EXPORT int InitializeInjectionNvtx2(NvtxGetExportTableFunc_t get_export_table) {
+  std::lock_guard<std::mutex> init_lock(g_nvtx_init_mu);
+  static bool first = true, disabled = false;
+  const bool is_first = first;
+  if (first) {
+    // Environment read once: later modules can initialise on any thread, long
+    // after startup, when getenv() would race with the app's setenv().
+    first = false;
+    g_quiet = env_true("WARPSPAN_QUIET");
+    disabled = env_true("WARPSPAN_DISABLE");
+    if (!disabled) {
+      auto *store = new (std::nothrow) Labels();
+      if (store) {
+        if (const char *v = std::getenv("WARPSPAN_NVTX_MAX_LABELS")) {
+          long n = std::strtol(v, nullptr, 10);
+          if (n > 0 && n < (1L << 24)) store->max_paths = static_cast<uint32_t>(n) + 1;  // + the root
+        }
+        store->nodes.push_back(LabelNode{kRootPath, false, std::string(kKeyPrefix, '\0')});
+        g_labels_ptr.store(store, std::memory_order_release);
+        // A child forked while another thread holds a lock would block on its
+        // first range: hold both locks across fork().
+        auto unlock_all = [] {
+          Labels *L = labels();
+          L->reg_mu.unlock();
+          L->mu.unlock();
+          g_nvtx_init_mu.unlock();
+        };
+        pthread_atfork(
+            [] {
+              g_nvtx_init_mu.lock();
+              Labels *L = labels();
+              L->mu.lock();
+              L->reg_mu.lock();
+            },
+            unlock_all, unlock_all);
+      }
+    }
+  }
+  if (disabled || !labels() || !get_export_table) return 0;
+  const auto *cb = static_cast<const NvtxExportTableCallbacks *>(get_export_table(NVTX_ETID_CALLBACKS));
+  if (!cb || cb->struct_size < sizeof(NvtxExportTableCallbacks) || !cb->GetModuleFunctionTable) return 0;
+
+  auto set = [](NvtxFunctionTable table, unsigned size, unsigned id, auto fn) {
+    if (id < size && table[id]) *table[id] = reinterpret_cast<NvtxFunctionPointer>(fn);
+  };
+  NvtxFunctionTable core = nullptr, core2 = nullptr;
+  unsigned core_size = 0, core2_size = 0;
+  if (!cb->GetModuleFunctionTable(NVTX_CB_MODULE_CORE, &core, &core_size) || !core) return 0;
+  set(core, core_size, NVTX_CBID_CORE_RangePushEx, on_nvtx_range_push_ex);
+  set(core, core_size, NVTX_CBID_CORE_RangePushA, on_nvtx_range_push_a);
+  set(core, core_size, NVTX_CBID_CORE_RangePushW, on_nvtx_range_push_w);
+  set(core, core_size, NVTX_CBID_CORE_RangePop, on_nvtx_range_pop);
+  if (cb->GetModuleFunctionTable(NVTX_CB_MODULE_CORE2, &core2, &core2_size) && core2) {
+    set(core2, core2_size, NVTX_CBID_CORE2_DomainRangePushEx, on_nvtx_domain_range_push_ex);
+    set(core2, core2_size, NVTX_CBID_CORE2_DomainRangePop, on_nvtx_domain_range_pop);
+    set(core2, core2_size, NVTX_CBID_CORE2_DomainCreateA, on_nvtx_domain_create_a);
+    set(core2, core2_size, NVTX_CBID_CORE2_DomainCreateW, on_nvtx_domain_create_w);
+    set(core2, core2_size, NVTX_CBID_CORE2_DomainRegisterStringA, on_nvtx_register_string_a);
+    set(core2, core2_size, NVTX_CBID_CORE2_DomainRegisterStringW, on_nvtx_register_string_w);
+  }
+  if (const auto *vi = static_cast<const NvtxExportTableVersionInfo *>(get_export_table(NVTX_ETID_VERSIONINFO)))
+    if (vi->struct_size >= sizeof(NvtxExportTableVersionInfo) && vi->SetInjectionNvtxVersion)
+      vi->SetInjectionNvtxVersion(NVTX_VERSION);
+  if (is_first) log("recording NVTX ranges as labels");
+  return 1;
+}
+
+// For tests: the calling thread's open NVTX ranges as "outer > inner", written
+// to buf (NUL-terminated, truncated to size). Returns the depth, or -1 when
+// NVTX isn't routed to this library.
+WARPSPAN_EXPORT int warpspan_nvtx_labels(char *buf, size_t size) {
+  if (!labels()) return -1;
+  LabelChain chain;
+  label_chain(t_path, &chain);
+  size_t o = 0;
+  if (buf && size) buf[0] = '\0';
+  for (int i = 0; buf && i < chain.depth && o + 1 < size; i++) {
+    int n = std::snprintf(buf + o, size - o, "%s%.*s", i ? " > " : "", static_cast<int>(chain.len[i]), chain.text[i]);
+    if (n < 0) break;
+    o = std::min(size - 1, o + static_cast<size_t>(n));
+  }
+  return chain.depth;
 }

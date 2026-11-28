@@ -1,0 +1,55 @@
+---
+title: NVTX labels
+description: Use the NVTX ranges an app (or TensorRT, PyTorch and other libraries) already emits as frames above each kernel in the flame graph.
+---
+
+Many GPU programs already label their work with [NVTX](https://github.com/NVIDIA/NVTX) ranges for Nsight Systems: pipeline stages, model layers, training steps. Warpspan can record those ranges too. Every kernel then carries the ranges that were open on the thread that launched it, and the flame graph shows them as frames between the device and the kernel:
+
+```
+cuda:0
+└─ infer batch n=4                          your app's range
+   └─ ExecutionContext::enqueueV3           TensorRT's range
+      └─ /model/model.2/m.0/cv1/conv/Conv   TensorRT's per-layer range
+         └─ sm80_xmma_fprop_implicit_gemm_… the kernel
+```
+
+This needs no code changes and no OpenTelemetry, and it works next to the span bridges: a kernel can have both a span and NVTX labels.
+
+## Turn it on
+
+Point `NVTX_INJECTION64_PATH` at the same library as `CUDA_INJECTION64_PATH`:
+
+```sh
+export CUDA_INJECTION64_PATH=/opt/warpspan/lib/libwarpspan.so
+export NVTX_INJECTION64_PATH=/opt/warpspan/lib/libwarpspan.so
+```
+
+The app logs `warpspan: recording NVTX ranges as labels` on its first NVTX call. Without the second variable, NVTX calls stay no-ops and kernels have no labels, as before.
+
+In Kubernetes, add the variable next to `CUDA_INJECTION64_PATH` with the same value (`/warpspan/libwarpspan.so`).
+
+## What is recorded
+
+- `nvtxRangePush*` / `nvtxRangePop` and the domain versions (`nvtxDomainRangePushEx` / `nvtxDomainRangePop`), per thread, up to 32 levels deep.
+- ASCII, wide (converted to ASCII, other characters become `?`) and registered-string messages, up to 256 bytes.
+- Ranges from every library in the process. Each library compiled with NVTX initialises it separately (TensorRT, cuDNN, PyTorch, your own code), and all of them are routed to Warpspan.
+
+Not recorded: `nvtxRangeStart`/`nvtxRangeEnd` (they aren't tied to a thread), marks, categories, colours and payloads. Ranges of different domains share one stack per thread. A range must be popped on the thread that pushed it, as NVTX requires; one popped elsewhere stays open on the pushing thread.
+
+## Labels that change on every call
+
+Labels like `decode s3 f120` (stream 3, frame 120) give every call its own label path and its own tiny bar in the flame graph. Warpspan keeps them as they are, with limits so a long run can't use unbounded memory:
+
+- **In the app:** at most 16384 distinct label paths per process (`WARPSPAN_NVTX_MAX_LABELS`). Past it, a new label is recorded as `(more NVTX labels)` under its parent range, and the library logs it once and prints the count at exit. The table isn't emptied while the process runs, so once it is full, labels that first appear later (a new code path, a layer of a model loaded later) also land in `(more NVTX labels)`. A per-frame label above TensorRT's per-layer ranges uses about one path per layer per frame, so it can fill the table within a few hundred frames.
+- **Registered strings and domains** (`nvtxDomainRegisterString`, `nvtxDomainCreate`) are interned by text, at most 4096.
+- **In the agent:** the usual cap on distinct samples per process per interval. Past it, new samples lose their span and labels and are counted under the bare kernel name.
+
+For a readable flame graph, keep the changing part out of the range message: put the frame number in the range's payload, which Warpspan ignores and Nsight Systems still shows.
+
+## Cost
+
+Pushing a range takes a lock and a hash lookup in the library, on the app thread, and the first push of a new label allocates. Launching a kernel stores one more 32-bit word. NVTX ranges are usually coarse (a stage, a layer), so this stays small, but it has not been benchmarked yet.
+
+## Example: a TensorRT video pipeline
+
+[Argus](https://github.com/RazinAI/argus) decodes video streams, runs YOLO11s with TensorRT and encodes the result, and labels every stage with NVTX. Run with the two variables above on 4 streams, every one of its 50,845 kernels came with labels: Argus's own `infer batch n=4`, TensorRT's `enqueueV3`, and the TensorRT layer. In a 3-second run on a laptop RTX 3070, 13.6% of the GPU time went to a permutation kernel that TensorRT runs for its layout copies (the layers named `… copy` and `Reformatting CopyNode`), next to 68% in the convolutions. A trace or a kernel list alone doesn't show that.

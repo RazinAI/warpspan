@@ -201,6 +201,7 @@ The app needs the library loaded and three environment variables:
 - `CUDA_INJECTION64_PATH`: the path of `libwarpspan.so`. CUDA loads the library into the process. This is what turns Warpspan on.
 - `OTEL_SERVICE_NAME`: the same name your traces use. Grafana matches spans to profiles by service name.
 - `PYTHONPATH`, for Python apps: the Python span bridge's directory. If the app already sets `PYTHONPATH`, put the bridge first in it.
+- Optional, `NVTX_INJECTION64_PATH`, set to the same path as `CUDA_INJECTION64_PATH`: records the app's [NVTX ranges](/docs/nvtx), and those of TensorRT, PyTorch and other libraries, as frames above each kernel.
 
 <Callout title="Use the same service name as your traces">
 The library reads the service name only from `OTEL_SERVICE_NAME` (or `service.name` in `OTEL_RESOURCE_ATTRIBUTES`). If your app sets its service name in code, set the variable to the same value anyway, or Grafana won't find the profiles for its spans.

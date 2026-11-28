@@ -38,6 +38,56 @@ func TestRoundTrip(t *testing.T) {
 	}
 }
 
+func TestLabels(t *testing.T) {
+	kernels := &Kernels{
+		PID: 7,
+		Records: []Kernel{
+			{Name: "sgemm", StartNs: 1, EndNs: 2, Labels: []string{"infer s3 f120", "layer conv1"}},
+			{Name: "sgemm", StartNs: 3, EndNs: 4, Labels: []string{"infer s3 f120", "layer conv1"}},
+			{Name: "nms", StartNs: 5, EndNs: 6, Labels: []string{"infer s3 f120"}},
+			{Name: "copy", StartNs: 7, EndNs: 8},                                      // outside any range
+			{Name: "infer s3 f120", StartNs: 9, EndNs: 10, Labels: []string{"sgemm"}}, // strings are shared
+		},
+	}
+	msg := EncodeKernels(kernels)
+	got, err := Decode(msg)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for i := range kernels.Records {
+		kernels.Records[i].LabelKey = strings.Join(kernels.Records[i].Labels, LabelSep)
+	}
+	if !reflect.DeepEqual(got, kernels) {
+		t.Fatalf("got %+v\nwant %+v", got, kernels)
+	}
+	// 5 strings (sgemm, infer s3 f120, layer conv1, nms, copy) and 3 paths.
+	if n := binary.LittleEndian.Uint32(msg[HeaderSize+8:]); n != 5 {
+		t.Errorf("string_count %d, want 5", n)
+	}
+	if n := binary.LittleEndian.Uint32(msg[HeaderSize+12:]); n != 3 {
+		t.Errorf("path_count %d, want 3", n)
+	}
+}
+
+// Libraries from before NVTX labels send version 1; the agent still reads it.
+func TestVersion1(t *testing.T) {
+	kernels := &Kernels{PID: 3, DroppedTotal: 2, Records: []Kernel{
+		{Name: "k", StartNs: 1, EndNs: 2, TraceID: [16]byte{1}, SpanID: [8]byte{2}, Device: 1},
+		{Name: "k2", StartNs: 3, EndNs: 4},
+	}}
+	msg := EncodeKernelsV1(kernels)
+	if want := HeaderSize + KernelsFixedSizeV1 + 2*2 + 3 + 2*KernelRecordSizeV1; len(msg) != want {
+		t.Fatalf("v1 size %d, want %d", len(msg), want)
+	}
+	got, err := Decode(msg)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !reflect.DeepEqual(got, kernels) {
+		t.Fatalf("got %+v want %+v", got, kernels)
+	}
+}
+
 // The record size must match capture/protocol.h.
 func TestRecordSize(t *testing.T) {
 	one := EncodeKernels(&Kernels{Records: []Kernel{{Name: ""}}})
@@ -58,6 +108,20 @@ func TestDecodeErrors(t *testing.T) {
 	trailing := append(append([]byte(nil), valid...), 0)
 	binary.LittleEndian.PutUint32(trailing[8:], uint32(len(trailing)-HeaderSize)) // payload_len
 	longName := EncodeKernels(&Kernels{Records: []Kernel{{Name: strings.Repeat("k", MaxNameLen+1)}}})
+	// One string "k", one path [0], one record using path 0.
+	withPath := EncodeKernels(&Kernels{Records: []Kernel{{Name: "k", Labels: []string{"k"}}}})
+	pathOff := HeaderSize + KernelsFixedSize + 3 // path entry: u16 depth, u32 index
+	recOff := pathOff + 6
+	setU32 := func(m []byte, off int, v uint32) []byte {
+		m = append([]byte(nil), m...)
+		binary.LittleEndian.PutUint32(m[off:], v)
+		return m
+	}
+	setU16 := func(m []byte, off int, v uint16) []byte {
+		m = append([]byte(nil), m...)
+		binary.LittleEndian.PutUint16(m[off:], v)
+		return m
+	}
 
 	tests := []struct {
 		name string
@@ -73,6 +137,11 @@ func TestDecodeErrors(t *testing.T) {
 		{"too large", make([]byte, MaxMessage+1)},
 		{"trailing bytes", trailing},
 		{"kernel name too long", longName},
+		{"path index out of range", setU32(withPath, recOff+48, 1)},
+		{"label index out of range", setU32(withPath, pathOff+2, 5)},
+		{"path depth zero", setU16(withPath, pathOff, 0)},
+		{"path depth too large", setU16(withPath, pathOff, MaxNvtxDepth+1)},
+		{"label too long", EncodeKernels(&Kernels{Records: []Kernel{{Name: "k", Labels: []string{strings.Repeat("l", MaxLabelLen+1)}}}})},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
@@ -86,6 +155,8 @@ func TestDecodeErrors(t *testing.T) {
 func FuzzDecode(f *testing.F) {
 	f.Add(EncodeHello(&Hello{PID: 1, Attrs: []KV{{Key: "a", Value: "b"}}}))
 	f.Add(EncodeKernels(&Kernels{Records: []Kernel{{Name: "k", SpanID: [8]byte{1}}}}))
+	f.Add(EncodeKernels(&Kernels{Records: []Kernel{{Name: "k", Labels: []string{"a", "b"}}}}))
+	f.Add(EncodeKernelsV1(&Kernels{Records: []Kernel{{Name: "k"}}}))
 	f.Fuzz(func(t *testing.T, msg []byte) {
 		_, _ = Decode(msg) // must not panic or allocate unboundedly
 	})

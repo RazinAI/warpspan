@@ -18,7 +18,7 @@ Every message starts with 16 bytes:
 | Offset | Type | Field |
 | --- | --- | --- |
 | 0 | u32 | magic `0x4E505357` (`"WSPN"`) |
-| 4 | u16 | version, `1` |
+| 4 | u16 | version, `2` (the agent also accepts `1`, from older libraries) |
 | 6 | u16 | type: `1` Hello, `2` Kernels |
 | 8 | u32 | payload length after the header |
 | 12 | u32 | pid of the sender, in its own pid namespace |
@@ -36,14 +36,16 @@ Keys: `process.executable.name`, `host.name`, and, if set in the app's environme
 
 ## Kernels
 
-A batch of finished kernels. Names are mangled, at most 2048 bytes, and stored once per message.
+A batch of finished kernels. Kernel names (mangled, at most 2048 bytes) and NVTX labels (at most 256 bytes) share one string table, and strings and label paths are stored once per message.
 
 ```
 u64 dropped_total     records lost over the process's lifetime
 u32 string_count
+u32 path_count
 u32 record_count
 string_count × str16
-record_count × 48-byte record
+path_count × (u16 depth, depth × u32 string index)   NVTX ranges, outermost first, depth 1 to 32
+record_count × 52-byte record
 ```
 
 | Offset | Type | Field |
@@ -54,6 +56,9 @@ record_count × 48-byte record
 | 32 | u8[8] | span_id, zero if not linked |
 | 40 | u32 | name index into the strings |
 | 44 | u32 | CUDA device |
+| 48 | u32 | path index, `0xFFFFFFFF` if launched outside any NVTX range |
+
+Version 1 messages have no `path_count`, no paths and 48-byte records without the path index.
 
 A message with bytes left after the last record is rejected. Timestamps are CUPTI's; on the test machine they matched Unix-epoch nanoseconds, which hasn't been checked on other drivers.
 

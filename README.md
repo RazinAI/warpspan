@@ -5,7 +5,10 @@ kernels a process runs, tags each one with the trace/span that was active on the
 launching thread, and exports them as OTLP profiles (for example to Pyroscope).
 
 It works like auto-instrumentation: no app code changes, only environment
-variables set at process start.
+variables set at process start. It can also record the app's NVTX ranges (and
+those of TensorRT, PyTorch and other libraries) as frames above each kernel, so
+programs labelled for Nsight Systems get a per-stage, per-layer GPU flame graph
+without OpenTelemetry.
 
 **Docs:** https://warpspan.docs.razin.ai · **Write-up:** [GPU Time per Request](https://razin.ai/blog/gpu-time-per-request)
 
@@ -184,6 +187,8 @@ Capture library (environment of the app process, read once at CUDA initialisatio
 | Variable | Default | |
 |---|---|---|
 | `CUDA_INJECTION64_PATH` | (none) | path to `libwarpspan.so`; enables warpspan |
+| `NVTX_INJECTION64_PATH` | (none) | the same path; records NVTX ranges as labels above each kernel ([docs](https://warpspan.docs.razin.ai/docs/nvtx)) |
+| `WARPSPAN_NVTX_MAX_LABELS` | `16384` | most distinct NVTX label paths per process; past it new labels show as `(more NVTX labels)` |
 | `WARPSPAN_SOCKET` | `/var/run/warpspan/warpspan.sock` | agent socket; empty = don't send |
 | `WARPSPAN_DEBUG_FILE` | (none) | write kernel records as text (`-` = stderr) |
 | `WARPSPAN_QUIET` | | `1` = no log lines on stderr |
@@ -200,7 +205,9 @@ Tested with Collector 0.165.0 and Pyroscope 2.4.4.
 
 ## Limitations
 
-- Only kernels: no memcpy/memset, no CPU or Python stacks.
+- Only kernels: no memcpy/memset, no CPU or Python stacks. NVTX ranges
+  (`nvtxRangePush`/`Pop`, domains included) are the only CPU-side context
+  besides spans; `nvtxRangeStart`/`End`, marks and payloads are ignored.
 - Span linking works per thread and needs a span bridge (Python, C++, Go, Java
   and Rust so far). Kernels launched from threads the span doesn't reach (e.g.
   PyTorch's autograd backward) are unlinked. In Python before 3.14, asyncio

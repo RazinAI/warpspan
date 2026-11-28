@@ -9,7 +9,7 @@
 //	resource: service.name, process.pid, host.name, k8s.*, ... (become Pyroscope labels)
 //	profile "gpu_time"        sample type gpu_time/nanoseconds, period type gpu/nanoseconds
 //	profile "kernel_launches" sample type kernel_launches/count, same period type
-//	sample stack (leaf first): [kernel name, "cuda:<device>"]
+//	sample stack (leaf first): [kernel name, NVTX ranges innermost first..., "cuda:<device>"]
 //	sample link:  trace_id + span_id of the span that launched the kernel
 //
 // Pyroscope names the profile after the period type ("gpu") and turns each
@@ -19,6 +19,7 @@ package otlp
 
 import (
 	"crypto/rand"
+	"encoding/binary"
 	"fmt"
 	"sort"
 
@@ -73,7 +74,14 @@ func Build(s *collect.Snapshot, opts Options) *collectorpb.ExportProfilesService
 				frame = kernelFrame(k.Name)
 				frames[k.Name] = frame
 			}
-			stack := d.stack(frame, fmt.Sprintf("cuda:%d", k.Device))
+			labels := k.LabelList()
+			stackFrames := make([]string, 0, len(labels)+2)
+			stackFrames = append(stackFrames, frame)
+			for i := len(labels) - 1; i >= 0; i-- {
+				stackFrames = append(stackFrames, labels[i])
+			}
+			stackFrames = append(stackFrames, fmt.Sprintf("cuda:%d", k.Device))
+			stack := d.stack(stackFrames)
 			var link int32
 			if k.Linked() {
 				link = d.link(k.TraceID, k.SpanID)
@@ -115,7 +123,10 @@ func keyLess(a, b collect.Key) bool {
 	if a.TraceID != b.TraceID {
 		return string(a.TraceID[:]) < string(b.TraceID[:])
 	}
-	return string(a.SpanID[:]) < string(b.SpanID[:])
+	if a.SpanID != b.SpanID {
+		return string(a.SpanID[:]) < string(b.SpanID[:])
+	}
+	return a.Labels < b.Labels
 }
 
 // dict builds the request-wide ProfilesDictionary. Index 0 of every table is
@@ -124,7 +135,7 @@ type dict struct {
 	d         *profilespb.ProfilesDictionary
 	strings   map[string]int32
 	locations map[string]int32 // frame name -> location index
-	stacks    map[[2]int32]int32
+	stacks    map[string]int32 // location indices, 4 bytes each -> stack index
 	links     map[[24]byte]int32
 	mapping   int32
 }
@@ -142,7 +153,7 @@ func newDict() *dict {
 		},
 		strings:   map[string]int32{"": 0},
 		locations: map[string]int32{},
-		stacks:    map[[2]int32]int32{},
+		stacks:    map[string]int32{},
 		links:     map[[24]byte]int32{},
 	}
 	d.mapping = int32(len(d.d.MappingTable))
@@ -176,15 +187,20 @@ func (d *dict) location(frame string) int32 {
 	return i
 }
 
-// stack returns a stack with leaf first: [leaf, root].
-func (d *dict) stack(leaf, root string) int32 {
-	key := [2]int32{d.location(leaf), d.location(root)}
-	if i, ok := d.stacks[key]; ok {
+// stack returns the stack for frames, leaf first.
+func (d *dict) stack(frames []string) int32 {
+	locs := make([]int32, len(frames))
+	key := make([]byte, 0, 4*len(frames))
+	for i, f := range frames {
+		locs[i] = d.location(f)
+		key = binary.LittleEndian.AppendUint32(key, uint32(locs[i]))
+	}
+	if i, ok := d.stacks[string(key)]; ok {
 		return i
 	}
 	i := int32(len(d.d.StackTable))
-	d.d.StackTable = append(d.d.StackTable, &profilespb.Stack{LocationIndices: key[:]})
-	d.stacks[key] = i
+	d.d.StackTable = append(d.d.StackTable, &profilespb.Stack{LocationIndices: locs})
+	d.stacks[string(key)] = i
 	return i
 }
 

@@ -13,10 +13,10 @@ import (
 	"github.com/RazinAI/warpspan/agent/wire"
 )
 
-// MaxKeysPerProcess caps distinct (kernel, device, span) samples per process
-// per interval. Beyond it, kernels are counted without their span. Keys without
-// a span may use maxKeysHard - MaxKeysPerProcess more; after that, kernels are
-// counted under OtherKernels.
+// MaxKeysPerProcess caps distinct (kernel, device, span, NVTX labels) samples
+// per process per interval. Beyond it, new samples are counted without their
+// span and NVTX labels, under the bare kernel name, which may use
+// maxKeysHard - MaxKeysPerProcess more keys; after that, under OtherKernels.
 const (
 	MaxKeysPerProcess = 20_000
 	maxKeysHard       = MaxKeysPerProcess + 2_000
@@ -41,6 +41,21 @@ type Key struct {
 	Device  uint32
 	TraceID [16]byte
 	SpanID  [8]byte
+	// Labels holds the NVTX ranges open at launch, outermost first, joined
+	// with LabelSep ("" when there were none). A string keeps Key comparable.
+	Labels string
+}
+
+// LabelSep separates NVTX labels in Key.Labels. NVTX messages are C strings,
+// so they can't contain it.
+const LabelSep = wire.LabelSep
+
+// LabelList returns the NVTX labels of the key, outermost first.
+func (k Key) LabelList() []string {
+	if k.Labels == "" {
+		return nil
+	}
+	return strings.Split(k.Labels, LabelSep)
 }
 
 // Linked reports whether the sample belongs to a span.
@@ -106,12 +121,16 @@ func (c *Collector) Add(id uint64, k *wire.Kernels) {
 	}
 	for i := range k.Records {
 		r := &k.Records[i]
-		key := Key{Name: r.Name, Device: r.Device, TraceID: r.TraceID, SpanID: r.SpanID}
+		key := Key{Name: r.Name, Device: r.Device, TraceID: r.TraceID, SpanID: r.SpanID, Labels: r.LabelKey}
 		st, ok := ps.snap.Samples[key]
-		if !ok && key.Linked() && len(ps.snap.Samples) >= MaxKeysPerProcess {
-			key.TraceID, key.SpanID = [16]byte{}, [8]byte{}
+		if !ok && len(ps.snap.Samples) >= MaxKeysPerProcess && (key.Linked() || key.Labels != "") {
+			// Past the soft cap, new samples lose their span and NVTX labels;
+			// the reserve up to maxKeysHard keeps bare kernel names.
+			if key.Linked() {
+				ps.snap.Unlinked++
+			}
+			key = Key{Name: r.Name, Device: r.Device}
 			st, ok = ps.snap.Samples[key]
-			ps.snap.Unlinked++
 		}
 		if !ok && len(ps.snap.Samples) >= maxKeysHard {
 			key = Key{Name: OtherKernels, Device: r.Device}

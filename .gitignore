@@ -29,3 +29,5 @@ deploy/run/
 bridge/cpp/bridge_test
 bridge/java/build/
 bridge/rust/target/
+capture/test/nvtx_test
+capture/test/nvtx_module.so
