@@ -187,6 +187,8 @@ service:
 </Tab>
 </Tabs>
 
+Pyroscope's default ingestion limit (4 MiB/s per tenant, 2 MiB burst) is low for a busy GPU service with spans and NVTX labels, and Pyroscope drops a whole push above it: the Collector then logs `push rate limit (4.0 MiB) exceeded`. Raise it with `-distributor.ingestion-rate-limit-mb` and `-distributor.ingestion-burst-size-mb` (or `ingestion_rate_mb` / `ingestion_burst_size_mb` in its limits config).
+
 The exporter name is `otlp_grpc` in Collector 0.165; older versions call it `otlp`. Upgrade the Collector and Pyroscope together, since the profiles format still changes between releases.
 
 Without a Collector, the agent can send straight to Pyroscope, which accepts OTLP profiles on its HTTP port: use Pyroscope's address, such as `http://pyroscope:4040`, as the endpoint. That path skips the Collector's batching and retries and is less tested.

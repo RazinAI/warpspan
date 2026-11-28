@@ -4,8 +4,10 @@
 (default `/var/run/warpspan/warpspan.sock`, override with `WARPSPAN_SOCKET`).
 
 - SEQPACKET keeps message boundaries: one `send()` is one message, delivered whole or not at all.
-- The library sends with `MSG_DONTWAIT | MSG_NOSIGNAL`. If the agent is busy, the message is
-  dropped and counted. It never blocks the app or kills it with `SIGPIPE`.
+- The library sends with `MSG_DONTWAIT | MSG_NOSIGNAL`. When the socket is full it polls up to
+  50 ms for the agent to drain it (on CUPTI's worker thread or the library's flush thread, never
+  on a launching app thread), then drops the message and counts it. It never kills the app with
+  `SIGPIPE`.
 - One connection per process. A closed connection means the process exited.
 - All integers are little-endian. Strings are `u16 length` + bytes (no terminator).
 - Messages are at most 60 KiB; the agent rejects larger ones.

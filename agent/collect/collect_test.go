@@ -93,8 +93,20 @@ func TestCollectorAggregatesAndResets(t *testing.T) {
 	}
 }
 
-func TestCollectorCapsKeys(t *testing.T) {
+// Small caps keep the cap tests fast.
+const (
+	MaxKeysPerProcess = 1000
+	maxKeysHard       = MaxKeysPerProcess + MaxKeysPerProcess/10
+)
+
+func newCapped() *Collector {
 	c := New(nil)
+	c.SetMaxSamples(MaxKeysPerProcess)
+	return c
+}
+
+func TestCollectorCapsKeys(t *testing.T) {
+	c := newCapped()
 	c.Hello(1, &wire.Hello{PID: 1})
 	recs := make([]wire.Kernel, MaxKeysPerProcess+10)
 	for i := range recs {
@@ -108,7 +120,7 @@ func TestCollectorCapsKeys(t *testing.T) {
 }
 
 func TestCollectorCapsUnlinkedNames(t *testing.T) {
-	c := New(nil)
+	c := newCapped()
 	c.Hello(1, &wire.Hello{PID: 1})
 	recs := make([]wire.Kernel, maxKeysHard+10)
 	for i := range recs {
@@ -149,7 +161,7 @@ func TestCollectorLabels(t *testing.T) {
 // Per-call labels ("infer f120", "infer f121", ...) can make thousands of keys.
 // Past the soft cap the labels are dropped and the kernel name is kept.
 func TestCollectorCapsLabels(t *testing.T) {
-	c := New(nil)
+	c := newCapped()
 	c.Hello(1, &wire.Hello{PID: 1})
 	var recs []wire.Kernel
 	for i := 0; i < MaxKeysPerProcess+10; i++ {

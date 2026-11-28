@@ -226,3 +226,76 @@ func TestBuildNvtxStack(t *testing.T) {
 		}
 	}
 }
+
+// A process with more samples than Pyroscope accepts in one profile is split
+// over several profile pairs, without losing any sample.
+func TestBuildSplitsLargeProfiles(t *testing.T) {
+	start := time.Unix(1700000000, 0)
+	n := 2*MaxSamplesPerProfile + 123
+	samples := make(map[collect.Key]collect.Stat, n)
+	for i := 0; i < n; i++ {
+		var k collect.Key
+		k.Name = "k"
+		k.SpanID = [8]byte{byte(i), byte(i >> 8), byte(i >> 16), 1}
+		samples[k] = collect.Stat{Count: 1, TotalNs: 10}
+	}
+	s := &collect.Snapshot{Start: start, End: start.Add(time.Second), Processes: []collect.ProcessSnapshot{{
+		Process: &collect.Process{PID: 1, Resource: []collect.Attr{{Key: "service.name", Value: "big"}}},
+		Samples: samples,
+	}}}
+	profiles := Build(s, Options{}).ResourceProfiles[0].ScopeProfiles[0].Profiles
+	if len(profiles) != 6 {
+		t.Fatalf("want 3 profile pairs, got %d profiles", len(profiles))
+	}
+	total := 0
+	for i, p := range profiles {
+		if len(p.Samples) > MaxSamplesPerProfile {
+			t.Fatalf("profile %d has %d samples", i, len(p.Samples))
+		}
+		if i%2 == 0 {
+			total += len(p.Samples)
+		}
+	}
+	if total != n {
+		t.Fatalf("time profiles hold %d samples, want %d", total, n)
+	}
+}
+
+// Export requests stay small however many samples a process has.
+func TestBuildRequestsChunks(t *testing.T) {
+	start := time.Unix(1700000000, 0)
+	n := 2*MaxSamplesPerProfile + 7
+	samples := make(map[collect.Key]collect.Stat, n)
+	for i := 0; i < n; i++ {
+		var k collect.Key
+		k.Name = "k"
+		k.SpanID = [8]byte{byte(i), byte(i >> 8), byte(i >> 16), 1}
+		samples[k] = collect.Stat{Count: 1, TotalNs: 10}
+	}
+	s := &collect.Snapshot{Start: start, End: start.Add(time.Second), Processes: []collect.ProcessSnapshot{
+		{Process: &collect.Process{PID: 1, Resource: []collect.Attr{{Key: "service.name", Value: "a"}}}, Samples: samples},
+		{Process: &collect.Process{PID: 2, Resource: []collect.Attr{{Key: "service.name", Value: "b"}}},
+			Samples: map[collect.Key]collect.Stat{{Name: "x"}: {Count: 1, TotalNs: 1}}},
+	}}
+	reqs := BuildRequests(s, Options{})
+	if len(reqs) != 4 { // 3 for process 1, 1 for process 2
+		t.Fatalf("got %d requests", len(reqs))
+	}
+	total := 0
+	for _, r := range reqs {
+		if len(r.ResourceProfiles) != 1 {
+			t.Fatal("one process per request")
+		}
+		p := r.ResourceProfiles[0].ScopeProfiles[0].Profiles
+		if len(p) != 2 || len(p[0].Samples) > MaxSamplesPerProfile {
+			t.Fatalf("request has %d profiles, %d samples", len(p), len(p[0].Samples))
+		}
+		total += len(p[0].Samples)
+		if sz := proto.Size(r); sz > 2<<20 {
+			t.Fatalf("request of %d bytes", sz)
+		}
+	}
+	if total != n+1 {
+		t.Fatalf("requests hold %d samples, want %d", total, n+1)
+	}
+}

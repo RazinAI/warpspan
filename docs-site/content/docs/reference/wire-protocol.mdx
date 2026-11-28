@@ -6,7 +6,7 @@ description: The messages libwarpspan.so sends to the agent over the unix socket
 The library talks to the node agent over a unix `SOCK_SEQPACKET` socket. The source of truth is `capture/protocol.h` on the C++ side and `agent/wire` on the Go side; they change together.
 
 - SEQPACKET keeps message boundaries: one `send()` is one message, delivered whole or not at all.
-- The library sends with `MSG_DONTWAIT | MSG_NOSIGNAL`. If the agent is busy, the message is dropped and counted. It never blocks the app or kills it with `SIGPIPE`.
+- The library sends with `MSG_DONTWAIT | MSG_NOSIGNAL`. When the socket is full it waits up to 50 ms for the agent (on CUPTI's or its own thread, never on a launching app thread), then drops the message and counts it. It never kills the app with `SIGPIPE`.
 - One connection per process. A closed connection means the process exited.
 - Integers are little-endian. A string is a `u16` length and the bytes, with no terminator.
 - Messages are at most 60 KiB.

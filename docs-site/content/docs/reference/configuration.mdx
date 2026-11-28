@@ -33,6 +33,7 @@ Without `OTEL_SERVICE_NAME` or a `service.name` in `OTEL_RESOURCE_ATTRIBUTES`, t
 | `--otlp-header k=v` | `OTEL_EXPORTER_OTLP_HEADERS` | | gRPC metadata. Repeat the flag for several. |
 | `--interval` | | `10s` | How often to export. |
 | `--node-name` | `NODE_NAME` | | Added as `k8s.node.name` to every profile. |
+| `--max-samples` | | `100000` | Most distinct samples (kernel × span × NVTX labels) per process per interval. A busy TensorRT app with spans and NVTX labels makes tens of thousands per second; lower `--interval` or raise this if spans show empty profiles. |
 | `--version` | | | Print the version and exit. |
 
 The endpoint's scheme picks the transport: `http://host:port` is plaintext, `https://host:port` or a bare `host:port` uses TLS. A path after the port isn't allowed. Each export has a 10 second timeout, and each round of exports has to finish within one interval (10 seconds at shutdown), so a hung Collector can't stall the agent.
@@ -43,5 +44,6 @@ The endpoint's scheme picks the transport: `http://host:port` is plaintext, `htt
 | --- | --- |
 | Message size | 60 KiB |
 | Kernel name length | 2048 bytes (the library truncates longer names) |
-| Samples per process per interval | 20,000 with a span; past that, kernels are counted without their span; past 22,000 they go under `[other kernels]` |
+| Samples per process per interval | `--max-samples` (100,000) with a span or NVTX labels; past that, kernels are counted under their bare name; 10% more and they go under `[other kernels]` |
+| Samples per profile message | 15,000; more are split over several profiles, because Pyroscope rejects a whole profile above 16,000 by default |
 | Connections | 1024 |

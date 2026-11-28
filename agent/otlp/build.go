@@ -41,6 +41,41 @@ const (
 	CountSampleType = "kernel_launches"
 )
 
+// MaxSamplesPerProfile bounds the samples in one profile message. Pyroscope's
+// default max_profile_stacktrace_samples is 16000 and it drops the whole
+// profile above it; spans x NVTX labels x kernels can exceed that in one
+// interval.
+const MaxSamplesPerProfile = 15000
+
+// BuildRequests splits a snapshot into export requests of at most
+// MaxSamplesPerProfile samples each (one or more per process), so no request
+// comes near gRPC's common 4 MiB message limit however high the collector's
+// sample cap is. A span's samples can land in different requests; Pyroscope
+// merges profiles of the same series and time at query time.
+func BuildRequests(s *collect.Snapshot, opts Options) []*collectorpb.ExportProfilesServiceRequest {
+	var reqs []*collectorpb.ExportProfilesServiceRequest
+	for _, ps := range s.Processes {
+		keys := make([]collect.Key, 0, len(ps.Samples))
+		for k := range ps.Samples {
+			keys = append(keys, k)
+		}
+		sort.Slice(keys, func(i, j int) bool { return keyLess(keys[i], keys[j]) })
+		for lo := 0; lo < len(keys); lo += MaxSamplesPerProfile {
+			hi := min(lo+MaxSamplesPerProfile, len(keys))
+			chunk := ps
+			chunk.Samples = make(map[collect.Key]collect.Stat, hi-lo)
+			for _, k := range keys[lo:hi] {
+				chunk.Samples[k] = ps.Samples[k]
+			}
+			one := &collect.Snapshot{Start: s.Start, End: s.End, Processes: []collect.ProcessSnapshot{chunk}}
+			if req := Build(one, opts); req != nil {
+				reqs = append(reqs, req)
+			}
+		}
+	}
+	return reqs
+}
+
 // Options control how profiles are built.
 type Options struct {
 	ScopeVersion string
@@ -65,9 +100,18 @@ func Build(s *collect.Snapshot, opts Options) *collectorpb.ExportProfilesService
 		}
 		sort.Slice(keys, func(i, j int) bool { return keyLess(keys[i], keys[j]) })
 
-		timeProfile := d.newProfile(TimeSampleType, "nanoseconds", start, duration)
-		countProfile := d.newProfile(CountSampleType, "count", start, duration)
-		for _, k := range keys {
+		// Pyroscope rejects a whole profile above max_profile_stacktrace_samples
+		// (16000 by default), so samples are split over several profile pairs.
+		// Chunks follow key order, so one span can span two profiles; that
+		// relies on Pyroscope merging profiles of the same series and time.
+		var profiles []*profilespb.Profile
+		var timeProfile, countProfile *profilespb.Profile
+		for i, k := range keys {
+			if i%MaxSamplesPerProfile == 0 {
+				timeProfile = d.newProfile(TimeSampleType, "nanoseconds", start, duration)
+				countProfile = d.newProfile(CountSampleType, "count", start, duration)
+				profiles = append(profiles, timeProfile, countProfile)
+			}
 			st := ps.Samples[k]
 			frame, ok := frames[k.Name]
 			if !ok {
@@ -77,8 +121,8 @@ func Build(s *collect.Snapshot, opts Options) *collectorpb.ExportProfilesService
 			labels := k.LabelList()
 			stackFrames := make([]string, 0, len(labels)+2)
 			stackFrames = append(stackFrames, frame)
-			for i := len(labels) - 1; i >= 0; i-- {
-				stackFrames = append(stackFrames, labels[i])
+			for j := len(labels) - 1; j >= 0; j-- {
+				stackFrames = append(stackFrames, labels[j])
 			}
 			stackFrames = append(stackFrames, fmt.Sprintf("cuda:%d", k.Device))
 			stack := d.stack(stackFrames)
@@ -103,7 +147,7 @@ func Build(s *collect.Snapshot, opts Options) *collectorpb.ExportProfilesService
 			Resource: res,
 			ScopeProfiles: []*profilespb.ScopeProfiles{{
 				Scope:    &commonpb.InstrumentationScope{Name: "warpspan", Version: opts.ScopeVersion},
-				Profiles: []*profilespb.Profile{timeProfile, countProfile},
+				Profiles: profiles,
 			}},
 		})
 	}

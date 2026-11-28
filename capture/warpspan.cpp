@@ -56,6 +56,7 @@
 
 #include <pthread.h>
 #include <signal.h>
+#include <poll.h>
 #include <sys/socket.h>
 #include <sys/un.h>
 #include <unistd.h>
@@ -467,6 +468,7 @@ struct State {
   // Guarded by out_mu.
   std::mutex out_mu;
   int fd = -1;
+  bool send_gave_up = false;  // a send wait timed out and no send has succeeded since
   uint64_t last_connect_attempt_ms = 0;
   bool logged_connect_failure = false;
   Bytes strings, paths, records;
@@ -488,14 +490,42 @@ void close_socket_locked() {
   g->fd = -1;
 }
 
-bool send_locked(const Bytes &msg) {
+// Kernel batches arrive in bursts (a full 2 MiB CUPTI buffer becomes ~35
+// messages at once) and the socket queues only ~200 KiB for an unprivileged
+// agent. So a batch send waits up to kSendWaitMs in total for the agent to
+// drain the queue instead of dropping at once. This runs on CUPTI's worker
+// thread or the flush thread, and on an app thread only inside
+// warpspan_flush() or the exit flush; never on the launch path. After one
+// timeout, sends stop waiting until a send succeeds again, so a stalled agent
+// costs kSendWaitMs once per stall, not once per message or buffer.
+constexpr int kSendWaitMs = 50;
+
+bool send_locked(const Bytes &msg, bool wait = false) {
   if (g->fd < 0) return false;
-  // SOCK_SEQPACKET sends the whole message or fails.
-  if (send(g->fd, msg.buf.data(), msg.buf.size(), MSG_DONTWAIT | MSG_NOSIGNAL) >= 0) return true;
-  if (errno == EAGAIN || errno == EWOULDBLOCK) return false;  // agent busy: drop
-  log("lost connection to agent (%s), will reconnect", std::strerror(errno));
-  close_socket_locked();
-  return false;
+  const uint64_t deadline = monotonic_ms() + kSendWaitMs;
+  for (;;) {
+    // SOCK_SEQPACKET sends the whole message or fails.
+    if (send(g->fd, msg.buf.data(), msg.buf.size(), MSG_DONTWAIT | MSG_NOSIGNAL) >= 0) {
+      g->send_gave_up = false;
+      return true;
+    }
+    if (errno == EINTR) continue;
+    if (errno == EAGAIN || errno == EWOULDBLOCK) {
+      const uint64_t now = monotonic_ms();
+      if (wait && !g->send_gave_up && now < deadline) {
+        pollfd p{g->fd, POLLOUT, 0};
+        const int r = poll(&p, 1, static_cast<int>(deadline - now));
+        if (r > 0 || (r < 0 && errno == EINTR)) continue;  // retry until the deadline
+        g->send_gave_up = true;
+      } else if (wait) {
+        g->send_gave_up = true;
+      }
+      return false;  // agent busy: drop
+    }
+    log("lost connection to agent (%s), will reconnect", std::strerror(errno));
+    close_socket_locked();
+    return false;
+  }
 }
 
 void connect_locked() {
@@ -543,7 +573,7 @@ void flush_batch_locked() {
     msg.raw(g->strings.buf.data(), g->strings.buf.size());
     msg.raw(g->paths.buf.data(), g->paths.buf.size());
     msg.raw(g->records.buf.data(), g->records.buf.size());
-    if (!send_locked(msg)) g->dropped.fetch_add(g->record_count, std::memory_order_relaxed);
+    if (!send_locked(msg, /*wait=*/true)) g->dropped.fetch_add(g->record_count, std::memory_order_relaxed);
   }
   g->strings.buf.clear();
   g->paths.buf.clear();

@@ -70,6 +70,8 @@ func main() {
 	flag.Var(headers, "otlp-header", "gRPC metadata key=value, repeatable (env OTEL_EXPORTER_OTLP_HEADERS)")
 	interval := flag.Duration("interval", 10*time.Second, "how often to export profiles")
 	nodeName := flag.String("node-name", envOr("", "NODE_NAME"), "added as k8s.node.name to every profile (env NODE_NAME)")
+	maxSamples := flag.Int("max-samples", collect.DefaultMaxKeysPerProcess,
+		"most distinct samples (kernel x span x NVTX labels) per process per interval; past it, spans and labels are dropped")
 	showVersion := flag.Bool("version", false, "print version and exit")
 	flag.Parse()
 
@@ -83,6 +85,7 @@ func main() {
 		extra = append(extra, collect.Attr{Key: "k8s.node.name", Value: *nodeName})
 	}
 	coll := collect.New(extra)
+	coll.SetMaxSamples(*maxSamples)
 
 	var exporter *otlp.Exporter
 	if *endpoint != "none" {
@@ -161,15 +164,17 @@ func flush(ctx context.Context, log *slog.Logger, c *collect.Collector, exp *otl
 	if exp == nil {
 		return
 	}
-	// One request per process keeps each request well under gRPC's default
-	// 4 MiB receive limit.
-	for _, p := range snap.Processes {
-		req := otlp.Build(&collect.Snapshot{Start: snap.Start, End: snap.End, Processes: []collect.ProcessSnapshot{p}}, opts)
-		if req == nil {
-			continue
-		}
+	// At most otlp.MaxSamplesPerProfile samples per request keeps each one
+	// well under gRPC's common 4 MiB receive limit.
+	for _, req := range otlp.BuildRequests(snap, opts) {
 		if err := exp.Export(ctx, req); err != nil {
-			log.Error("export failed; data for this interval is dropped", "pid", p.Process.PID, "err", err)
+			pid := ""
+			for _, a := range req.ResourceProfiles[0].Resource.Attributes {
+				if a.Key == "process.pid" {
+					pid = a.Value.GetStringValue()
+				}
+			}
+			log.Error("export failed; this part of the interval is dropped", "pid", pid, "err", err)
 		}
 	}
 }

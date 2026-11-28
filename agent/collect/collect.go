@@ -13,14 +13,14 @@ import (
 	"github.com/RazinAI/warpspan/agent/wire"
 )
 
-// MaxKeysPerProcess caps distinct (kernel, device, span, NVTX labels) samples
-// per process per interval. Beyond it, new samples are counted without their
-// span and NVTX labels, under the bare kernel name, which may use
-// maxKeysHard - MaxKeysPerProcess more keys; after that, under OtherKernels.
+// The per-process cap on distinct (kernel, device, span, NVTX labels) samples
+// per interval (DefaultMaxKeysPerProcess, or SetMaxSamples). Beyond it, new
+// samples are counted without their span and NVTX labels, under the bare kernel
+// name, which may use 10% more keys; after that, under OtherKernels. Spans x
+// TensorRT layers x kernels reach tens of thousands per second.
 const (
-	MaxKeysPerProcess = 20_000
-	maxKeysHard       = MaxKeysPerProcess + 2_000
-	OtherKernels      = "[other kernels]"
+	DefaultMaxKeysPerProcess = 100_000
+	OtherKernels             = "[other kernels]"
 )
 
 // Attr is one resource attribute.
@@ -72,7 +72,7 @@ type ProcessSnapshot struct {
 	Process  *Process
 	Samples  map[Key]Stat
 	Dropped  uint64 // records the capture library lost during the interval
-	Unlinked int64  // kernels whose span was discarded because of MaxKeysPerProcess
+	Unlinked int64  // kernels whose span was discarded because of the sample cap
 }
 
 // Snapshot is everything collected during one interval.
@@ -95,11 +95,24 @@ type Collector struct {
 	procs map[uint64]*procState
 	start time.Time
 	extra []Attr // added to every process resource (e.g. k8s.node.name)
+
+	maxKeys, maxKeysHard int
 }
 
 // New returns a Collector. extra attributes are added to every resource.
 func New(extra []Attr) *Collector {
-	return &Collector{procs: map[uint64]*procState{}, start: time.Now(), extra: extra}
+	c := &Collector{procs: map[uint64]*procState{}, start: time.Now(), extra: extra}
+	c.SetMaxSamples(DefaultMaxKeysPerProcess)
+	return c
+}
+
+// SetMaxSamples sets the per-process cap on distinct samples per interval.
+// Call it before connections are added.
+func (c *Collector) SetMaxSamples(n int) {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	c.maxKeys = max(n, 1)
+	c.maxKeysHard = c.maxKeys + max(c.maxKeys/10, 1)
 }
 
 // Hello registers the process behind connection id.
@@ -123,7 +136,7 @@ func (c *Collector) Add(id uint64, k *wire.Kernels) {
 		r := &k.Records[i]
 		key := Key{Name: r.Name, Device: r.Device, TraceID: r.TraceID, SpanID: r.SpanID, Labels: r.LabelKey}
 		st, ok := ps.snap.Samples[key]
-		if !ok && len(ps.snap.Samples) >= MaxKeysPerProcess && (key.Linked() || key.Labels != "") {
+		if !ok && len(ps.snap.Samples) >= c.maxKeys && (key.Linked() || key.Labels != "") {
 			// Past the soft cap, new samples lose their span and NVTX labels;
 			// the reserve up to maxKeysHard keeps bare kernel names.
 			if key.Linked() {
@@ -132,7 +145,7 @@ func (c *Collector) Add(id uint64, k *wire.Kernels) {
 			key = Key{Name: r.Name, Device: r.Device}
 			st, ok = ps.snap.Samples[key]
 		}
-		if !ok && len(ps.snap.Samples) >= maxKeysHard {
+		if !ok && len(ps.snap.Samples) >= c.maxKeysHard {
 			key = Key{Name: OtherKernels, Device: r.Device}
 			st = ps.snap.Samples[key]
 		}
