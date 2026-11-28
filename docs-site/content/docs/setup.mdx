@@ -350,10 +350,10 @@ In Grafana, under **Connections → Data sources**:
 2. Open your **Tempo** data source and find **Trace to profiles**:
    - Data source: the Pyroscope data source.
    - Tags: `service.name` as `service_name`.
-   - Profile type: `gpu` → `gpu_time`.
+   - Profile type: `gpu` → `span_gpu_time`.
 3. Save.
 
-Open a trace from the app, click a span, and **Profiles for this span** shows the GPU kernels that span launched, with their GPU time. The button only appears on spans that carry the `pyroscope.profile.id` attribute, which the bridges add.
+Open a trace from the app, click a span, and **Profiles for this span** shows that span's GPU time and the group of similar spans it belongs to; the slowest spans show every kernel they launched. [Span profiles and cost](/docs/span-profiles) explains the views and `--span-profiles`. The button only appears on spans that carry the `pyroscope.profile.id` attribute, which the bridges add.
 
 </Step>
 </Steps>

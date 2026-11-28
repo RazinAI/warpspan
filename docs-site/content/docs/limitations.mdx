@@ -11,6 +11,8 @@ description: What Warpspan doesn't see yet, and where it drops data on purpose.
 
 ## Linking kernels to spans
 
+- By default (`--span-profiles=grouped`) a typical span's profile has its own GPU time and its group, not its per-kernel times; the slowest spans keep every kernel. Spans that never repeat the same kernels (dynamic shapes, autotuning) each form their own group. See [Span profiles and cost](/docs/span-profiles).
+
 - Linking works per thread and needs a [span bridge](/docs/bridges). Without one, kernels are recorded without a span.
 - Kernels launched from threads the span doesn't reach aren't linked. PyTorch's autograd backward pass, which runs on its own threads, is the common case.
 - In Python before 3.14, asyncio tasks and thread pools running a copied context switch spans without telling the bridge, so their kernels can get the span last attached on that thread. 3.14 fixes this in the main interpreter.

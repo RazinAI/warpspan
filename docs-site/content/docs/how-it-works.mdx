@@ -47,11 +47,11 @@ Each bridge also sets the span attribute `pyroscope.profile.id` to the span ID, 
 
 The library batches tagged records and sends them about once a second over a unix `SOCK_SEQPACKET` socket to the agent on the same node. Sends never block: if the agent is busy, the batch is dropped and counted. At exit the library does one last forced flush, so short processes are recorded too.
 
-The agent keeps one connection per process. Every interval (10 seconds by default) it sums GPU time and launch counts per process, kernel, device and span, and exports one OTLP profiles request per process to the Collector over gRPC. See [Wire protocol](/docs/reference/wire-protocol) for the socket format.
+The agent keeps one connection per process. Every interval (10 seconds by default) it sums GPU time and launch counts per process, kernel, device, NVTX path and span, groups similar spans ([Span profiles and cost](/docs/span-profiles)), and exports OTLP profiles to the Collector over gRPC. See [Wire protocol](/docs/reference/wire-protocol) for the socket format.
 
 ## The profile
 
-Per process there are two profiles, `gpu_time` in nanoseconds and `kernel_launches` as a count, both with period type `gpu`, which is why Pyroscope names them `gpu`. Each sample's stack is two frames, `cuda:<device>` and the kernel name. The launching span goes into the sample's link, which Pyroscope turns into `span_id` and `trace_id` labels.
+Per process there are three profiles, all with period type `gpu`, which is why Pyroscope names them `gpu`: `gpu_time` in nanoseconds and `kernel_launches` as a count make the service view, and `span_gpu_time` is the per-span view. Each sample's stack is `cuda:<device>`, the NVTX ranges open at launch, and the kernel name; kernels from spans sit under their group frame. In `span_gpu_time` the span goes into the sample's link, which Pyroscope turns into `span_id` and `trace_id` labels.
 
 Kernel names arrive mangled. The agent demangles them and shortens long template names: namespaces inside template arguments are dropped, lambdas become `{lambda}`, and if the name is still over 160 characters the deepest template arguments become `<…>`. PyTorch's GELU kernel, for example, becomes `at::native::vectorized_elementwise_kernel<4, GeluCUDAKernelImpl::{lambda}, array<char*, 2ul>, false>`.
 

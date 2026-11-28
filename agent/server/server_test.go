@@ -45,7 +45,7 @@ func TestServerReceivesKernels(t *testing.T) {
 		snap := c.Snapshot(time.Now())
 		if len(snap.Processes) == 1 {
 			p := snap.Processes[0]
-			if p.Process.Resource[0].Value != "svc" || p.Samples[collect.Key{Name: "k"}] != (collect.Stat{Count: 1, TotalNs: 10}) {
+			if p.Process.Resource[0].Value != "svc" || p.Samples[collect.Key{Name: "k"}] != (collect.Stat{Count: 1, TotalNs: 10, LastEndNs: 11}) {
 				t.Fatalf("unexpected snapshot: %+v", p)
 			}
 			break

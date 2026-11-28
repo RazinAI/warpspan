@@ -1,0 +1,66 @@
+---
+title: Span profiles and cost
+description: What "Profiles for this span" shows, how the agent groups similar spans to keep storage bounded, and how to choose between grouped, full and off.
+---
+
+A GPU service launches thousands of kernels a second. Keeping every kernel of every span means about one stored sample per kernel launch, so storage grows with traffic. For a video pipeline with TensorRT (8 streams, NVTX labels on every layer), that was about 30 GB a day in Pyroscope. So by default the agent groups similar spans.
+
+## Two views
+
+The agent exports two kinds of profile, and no kernel is counted twice in either:
+
+| Profile type | What it is | Use it for |
+| --- | --- | --- |
+| `gpu_time`, `kernel_launches` | The service view: every kernel, no span links. Kernels launched inside spans sit under their group, like `[spans 8ac31b · typical]`. | The service's flame graph, comparing typical and slow groups |
+| `span_gpu_time` | The per-span view, linked to each span | Grafana's **Profiles for this span** |
+
+Point Tempo's **Trace to profiles** at `span_gpu_time` (the compose stack does).
+
+## Grouping (the default, `--span-profiles=grouped`)
+
+Every interval, for each process, the agent:
+
+1. **Groups spans by shape.** Spans that ran the same set of (NVTX path, kernel) rows share a group, for example every inference batch of 8 frames. The group's ID is a hash of that set, so it stays the same across intervals and Pyroscope adds it up over any time range.
+2. **Splits each group by speed.** Within a group of at least 10 spans, those above the 90th percentile of GPU time, and at least 1.2 times the group's median, are `slow`; the rest are `typical`. The 64 largest groups of a process keep their own frame; smaller ones share `[spans · other shapes]`, so code whose spans never repeat can't flood the flame graph.
+3. **Keeps exemplars.** The slowest span of the process in the interval (`--exemplars`, default 1), whatever its group, keeps all its rows.
+4. **Gives every other span a small profile of its own:** its real GPU time, under its group and the NVTX ranges all its kernels share, ending in a frame that says how many kernel rows it had:
+
+```
+cuda:0
+└─ [spans 9127ad · typical]
+   └─ infer batch n=8 > enqueue > ExecutionContext::enqueueV3
+      └─ (192 kernel rows; per-kernel detail in gpu_time)     12.9 ms  ← this span's own time
+```
+
+So **Profiles for this span** always shows the span's GPU time as recorded, and which group it belongs to. Kernels lost under load (the library's `dropped`, or the agent's `unlinked_over_cap` in its log) are missing from it. For the per-kernel breakdown of a typical span, open `gpu_time` for the same service and time and look under its group: that is what spans of this group do, not this span alone. Exemplars show their own kernels.
+
+Kernels finish after the span that launched them. Spans whose last kernel ended within 2 s (GPU time) of the newest kernel of the process wait for the next interval, once, so a normal span is grouped whole. A span that keeps launching kernels for longer (a training loop, a long stream) is exported as it goes, in parts, and so is one with more than 2 s between its GPU bursts.
+
+## Modes
+
+| `--span-profiles` | Per-span view | Cost |
+| --- | --- | --- |
+| `grouped` (default) | Each span's own total and group; every kernel for the slowest spans | About one row per span instead of one per kernel, plus one profile per group |
+| `full` | Every span keeps every kernel | About one row per kernel launch; fine for a short local run |
+| `off` | None | Only the service view |
+
+## What it costs
+
+Measured on the TensorRT pipeline above (8 streams, 248 batch spans, 50,682 kernels in one interval): `full` produced 48,608 span rows, `grouped` 439. Pyroscope kept about 70 bytes per row before compaction, so:
+
+| Per-span view, live at 25 batches a second, 10 s interval | Rows per interval | Rough storage per day |
+| --- | --- | --- |
+| `full`, every trace sampled | ~48,000 | ~30 GB |
+| `grouped`, every trace sampled | ~440 (250 own rows + one 192-row exemplar) | ~0.27 GB |
+| `grouped`, traces sampled at 5% | ~200, mostly the exemplar | ~0.12 GB |
+| the same with `--interval 60s` | ~270 per minute (75 own rows + the exemplar) | ~0.03 GB |
+
+The service view (`gpu_time`) adds about one row per (group, NVTX path, kernel) per interval: about 2,500 for this pipeline at 10 s, so ~1.5 GB a day. Most of those rows come from labels that change on every call (its decode ranges carry the frame number), and those grow with the interval, so a longer interval saves little here. Without them it would be a few hundred rows per interval, and a 60 s interval would cut that part six times. See [NVTX labels](/docs/nvtx). All figures are estimates from the measured rows, before Pyroscope's compaction.
+
+The cheapest control is the one you already have: trace sampling. Only kernels under sampled spans are linked, so `OTEL_TRACES_SAMPLER=parentbased_traceidratio` with `OTEL_TRACES_SAMPLER_ARG=0.05` cuts the per-span view 20 times.
+
+## Limits
+
+- Grouping by exact shape works when spans repeat the same kernels, like a fixed model or a fixed batch size. Code that picks different kernels on every call (dynamic shapes, autotuning) gives every span its own group, and grouping saves little.
+- `slow` is relative to the interval: the 90th percentile of that group in that interval.
+- A typical span's profile has its total, not its per-kernel times.

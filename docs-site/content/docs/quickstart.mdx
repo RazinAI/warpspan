@@ -53,7 +53,7 @@ Grafana listens on `localhost:3000`. Set `GRAFANA_PORT=3001` if that port is tak
 ### Start the agent
 
 ```sh
-./bin/warpspan --socket /tmp/warpspan/warpspan.sock --otlp-endpoint http://127.0.0.1:4317 &
+./bin/warpspan --socket /tmp/warpspan/warpspan.sock --otlp-endpoint http://127.0.0.1:4317 --span-profiles=full &
 ```
 
 `http://` means plaintext. See [Configuration](/docs/reference/configuration) for TLS and headers.
@@ -84,7 +84,7 @@ The `PYTHONPATH` line loads the Python span bridge. Any other CUDA program works
 - The agent logs one `interval` line per export, with `kernels=` and `linked_to_spans=`.
 - `profiles-dump` prints samples such as `[812345]  cuda:0 > at::native::… [trace=… span=…]`. The IDs match the ones the example prints.
 - In Grafana, pick the Pyroscope data source, profile type `gpu` then `gpu_time`, service `torch-spans-example`. A freshly started Pyroscope can take about a minute before data is queryable.
-- In Grafana's trace view, open a trace from Tempo and click a span: **Profiles for this span** shows its kernels.
+- In Grafana's trace view, open a trace from Tempo and click a span: **Profiles for this span** shows its kernels. `--span-profiles=full` keeps every kernel of every span, which is fine for a short local run; the default groups similar spans to keep storage bounded ([Span profiles and cost](/docs/span-profiles)).
 
 ## Without any backend
 

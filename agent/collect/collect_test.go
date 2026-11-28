@@ -70,10 +70,10 @@ func TestCollectorAggregatesAndResets(t *testing.T) {
 		t.Fatalf("want 1 process, got %d", len(s.Processes))
 	}
 	p := s.Processes[0]
-	if got := p.Samples[Key{Name: "k", TraceID: trace, SpanID: span}]; got != (Stat{Count: 2, TotalNs: 150}) {
+	if got := p.Samples[Key{Name: "k", TraceID: trace, SpanID: span}]; got != (Stat{Count: 2, TotalNs: 150, LastEndNs: 100}) {
 		t.Fatalf("linked sample %+v", got)
 	}
-	if got := p.Samples[Key{Name: "k"}]; got != (Stat{Count: 1, TotalNs: 10}) {
+	if got := p.Samples[Key{Name: "k"}]; got != (Stat{Count: 1, TotalNs: 10, LastEndNs: 10}) {
 		t.Fatalf("unlinked sample %+v", got)
 	}
 	// The first DroppedTotal (3) is a baseline from before we connected.
@@ -85,7 +85,7 @@ func TestCollectorAggregatesAndResets(t *testing.T) {
 	c.Add(1, &wire.Kernels{DroppedTotal: 6})
 	c.Close(1)
 	s = c.Snapshot(time.Now())
-	if len(s.Processes) != 1 || s.Processes[0].Dropped != 1 || len(s.Processes[0].Samples) != 0 {
+	if len(s.Processes) != 1 || s.Processes[0].Dropped != 1 || len(s.Processes[0].Samples) != 0 || !s.Processes[0].Closed {
 		t.Fatalf("second snapshot: %+v", s.Processes)
 	}
 	if s = c.Snapshot(time.Now()); len(s.Processes) != 0 {

@@ -16,7 +16,7 @@ description: Collector, Pyroscope, Tempo and Grafana with docker-compose, and wh
 docker compose -f deploy/docker-compose.yaml up -d
 ```
 
-Ports are bound to localhost only, because Grafana runs with anonymous admin access. Grafana comes provisioned with Pyroscope and Tempo data sources, and Tempo's traces-to-profiles setting points at the `gpu_time` profile type with `service.name` mapped to Pyroscope's `service_name`.
+Ports are bound to localhost only, because Grafana runs with anonymous admin access. Grafana comes provisioned with Pyroscope and Tempo data sources, and Tempo's traces-to-profiles setting points at the `span_gpu_time` profile type with `service.name` mapped to Pyroscope's `service_name`.
 
 To run the agent in Docker too, start the `agent` profile:
 

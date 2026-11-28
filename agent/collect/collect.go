@@ -65,12 +65,28 @@ func (k Key) Linked() bool { return k.SpanID != [8]byte{} }
 type Stat struct {
 	Count   int64
 	TotalNs int64
+	// LastEndNs is the latest GPU end time among the merged kernels (CUPTI
+	// clock), used to tell whether a span may still get kernels.
+	LastEndNs uint64
+}
+
+// Merge adds o to s.
+func (s Stat) Merge(o Stat) Stat {
+	s.Count += o.Count
+	s.TotalNs += o.TotalNs
+	s.LastEndNs = max(s.LastEndNs, o.LastEndNs)
+	return s
 }
 
 // ProcessSnapshot is what one process contributed during one interval.
 type ProcessSnapshot struct {
-	Process  *Process
-	Samples  map[Key]Stat
+	Process *Process
+	Samples map[Key]Stat
+	// SpanSamples is the per-span view, filled by agent/group from the
+	// span-linked Samples; the Collector leaves it empty.
+	SpanSamples map[Key]Stat
+	// Closed is set on the last snapshot of a process that disconnected.
+	Closed   bool
 	Dropped  uint64 // records the capture library lost during the interval
 	Unlinked int64  // kernels whose span was discarded because of the sample cap
 }
@@ -153,6 +169,7 @@ func (c *Collector) Add(id uint64, k *wire.Kernels) {
 		if r.EndNs > r.StartNs {
 			st.TotalNs += int64(r.EndNs - r.StartNs)
 		}
+		st.LastEndNs = max(st.LastEndNs, r.EndNs)
 		ps.snap.Samples[key] = st
 	}
 	// DroppedTotal is a lifetime counter; the first value seen (e.g. after an
@@ -190,7 +207,8 @@ func (c *Collector) Snapshot(now time.Time) *Snapshot {
 		if ps.droppedTotal > ps.droppedBase {
 			ps.snap.Dropped = ps.droppedTotal - ps.droppedBase
 		}
-		if len(ps.snap.Samples) > 0 || ps.snap.Dropped > 0 {
+		ps.snap.Closed = ps.closed
+		if len(ps.snap.Samples) > 0 || ps.snap.Dropped > 0 || ps.closed {
 			s.Processes = append(s.Processes, ps.snap)
 		}
 		ps.snap = ProcessSnapshot{Process: ps.snap.Process, Samples: map[Key]Stat{}}

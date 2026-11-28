@@ -45,4 +45,4 @@ The library couldn't reach the agent. Check the agent runs, that both use the sa
 
 ## No "Profiles for this span" button in Grafana
 
-Grafana shows it only for spans with the `pyroscope.profile.id` attribute, which the bridges set on sampled spans. Check that Tempo's data source has traces-to-profiles pointing at your Pyroscope data source.
+Grafana shows it only for spans with the `pyroscope.profile.id` attribute, which the bridges set on sampled spans. Check that Tempo's data source has traces-to-profiles pointing at your Pyroscope data source, with profile type `span_gpu_time`. If the button opens an empty profile, the profile type is probably still `gpu_time`, which has no span links.

@@ -88,7 +88,7 @@ make
 #    docker compose -f deploy/docker-compose.yaml up -d
 
 # 2. The agent
-./bin/warpspan --socket /tmp/warpspan/warpspan.sock --otlp-endpoint http://127.0.0.1:4317 &
+./bin/warpspan --socket /tmp/warpspan/warpspan.sock --otlp-endpoint http://127.0.0.1:4317 --span-profiles=full &
 
 # 3. Any CUDA program, with warpspan injected
 export CUDA_INJECTION64_PATH=$PWD/capture/libwarpspan.so
@@ -148,9 +148,12 @@ What to look for:
 - In Pyroscope or Grafana: profile type `gpu` → `gpu_time`, service
   `torch-spans-example`. A freshly started Pyroscope can take about a minute
   before data becomes queryable.
-- In Grafana's trace view, spans have a "Profiles for this span" button. Grafana
-  shows it only for spans with the `pyroscope.profile.id` attribute, which the
-  bridge sets (to the span ID) on every span that becomes current.
+- In Grafana's trace view, spans have a "Profiles for this span" button (profile
+  type `span_gpu_time`). Grafana shows it only for spans with the
+  `pyroscope.profile.id` attribute, which the bridge sets (to the span ID) on every
+  span that becomes current. `--span-profiles=full` keeps every kernel of every
+  span, fine for a short run; the default, `grouped`, keeps storage bounded by
+  grouping similar spans ([docs](https://warpspan.docs.razin.ai/docs/span-profiles)).
 
 Without any agent, `WARPSPAN_DEBUG_FILE=/tmp/kernels.log` (`-` for stderr)
 writes one line per kernel, including trace/span IDs.
@@ -197,7 +200,8 @@ Capture library (environment of the app process, read once at CUDA initialisatio
 
 Agent: `./bin/warpspan -h`. The flags are `--socket`, `--otlp-endpoint`
 (`http://host:port` is plaintext, `https://host:port` or `host:port` uses TLS,
-`none` disables export), `--otlp-header k=v`, `--interval`, `--node-name`.
+`none` disables export), `--otlp-header k=v`, `--interval`, `--node-name`,
+`--span-profiles grouped|full|off`, `--exemplars`, `--max-samples`.
 It also reads `OTEL_EXPORTER_OTLP_ENDPOINT` and `OTEL_EXPORTER_OTLP_HEADERS`.
 
 OTLP profiles are alpha: the Collector needs `--feature-gates=service.profilesSupport`.

@@ -15,7 +15,7 @@ datasources:
       # "Profiles for this span" button in the trace view.
       tracesToProfiles:
         datasourceUid: pyroscope
-        profileTypeId: "gpu:gpu_time:nanoseconds:gpu:nanoseconds"
+        profileTypeId: "gpu:span_gpu_time:nanoseconds:gpu:nanoseconds"
         tags:
           - key: service.name
             value: service_name

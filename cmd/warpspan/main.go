@@ -16,6 +16,7 @@ import (
 	"time"
 
 	"github.com/RazinAI/warpspan/agent/collect"
+	"github.com/RazinAI/warpspan/agent/group"
 	"github.com/RazinAI/warpspan/agent/otlp"
 	"github.com/RazinAI/warpspan/agent/server"
 )
@@ -72,6 +73,11 @@ func main() {
 	nodeName := flag.String("node-name", envOr("", "NODE_NAME"), "added as k8s.node.name to every profile (env NODE_NAME)")
 	maxSamples := flag.Int("max-samples", collect.DefaultMaxKeysPerProcess,
 		"most distinct samples (kernel x span x NVTX labels) per process per interval; past it, spans and labels are dropped")
+	spanProfiles := flag.String("span-profiles", string(group.Grouped),
+		"per-span GPU profiles: grouped (about one row per span: group profiles, each span's own total, full detail for the slowest), "+
+			"full (every span keeps every kernel; cost grows with traffic), off")
+	exemplars := flag.Int("exemplars", group.DefaultOptions().Exemplars,
+		"grouped mode: slowest spans per process per interval that keep every kernel")
 	showVersion := flag.Bool("version", false, "print version and exit")
 	flag.Parse()
 
@@ -86,10 +92,17 @@ func main() {
 	}
 	coll := collect.New(extra)
 	coll.SetMaxSamples(*maxSamples)
+	mode, err := group.ParseMode(*spanProfiles)
+	if err != nil {
+		log.Error("invalid --span-profiles", "err", err)
+		os.Exit(2)
+	}
+	gopts := group.DefaultOptions()
+	gopts.Mode, gopts.Exemplars = mode, max(*exemplars, 0)
+	grouper := group.New(gopts)
 
 	var exporter *otlp.Exporter
 	if *endpoint != "none" {
-		var err error
 		if exporter, err = otlp.NewExporter(*endpoint, headers); err != nil {
 			log.Error("invalid OTLP endpoint", "err", err)
 			os.Exit(2)
@@ -102,7 +115,8 @@ func main() {
 		log.Error("cannot listen", "socket", *socket, "err", err)
 		os.Exit(1)
 	}
-	log.Info("warpspan agent started", "version", version, "socket", *socket, "otlp_endpoint", *endpoint, "interval", *interval)
+	log.Info("warpspan agent started", "version", version, "socket", *socket, "otlp_endpoint", *endpoint, "interval", *interval,
+		"span_profiles", mode, "exemplars", gopts.Exemplars)
 
 	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
 	defer stop()
@@ -116,25 +130,25 @@ func main() {
 	defer ticker.Stop()
 	// Each flush must finish within its budget so a hung Collector neither
 	// delays the next interval nor blocks shutdown past the k8s grace period.
-	flushWithin := func(budget time.Duration) {
+	flushWithin := func(budget time.Duration, final bool) {
 		fctx, cancel := context.WithTimeout(context.Background(), budget)
 		defer cancel()
-		flush(fctx, log, coll, exporter, opts)
+		flush(fctx, log, coll, grouper, exporter, opts, final)
 	}
 	for {
 		select {
 		case <-ticker.C:
-			flushWithin(*interval)
+			flushWithin(*interval, false)
 		case err := <-serveErr:
 			if err != nil {
 				log.Error("server failed", "err", err)
 			}
-			flushWithin(shutdownFlushTimeout)
+			flushWithin(shutdownFlushTimeout, true)
 			return
 		case <-ctx.Done():
 			log.Info("shutting down")
 			<-serveErr // wait for connections to drain
-			flushWithin(shutdownFlushTimeout)
+			flushWithin(shutdownFlushTimeout, true)
 			return
 		}
 	}
@@ -142,14 +156,16 @@ func main() {
 
 const shutdownFlushTimeout = 10 * time.Second
 
-func flush(ctx context.Context, log *slog.Logger, c *collect.Collector, exp *otlp.Exporter, opts otlp.Options) {
-	snap := c.Snapshot(time.Now())
-	if len(snap.Processes) == 0 {
+func flush(ctx context.Context, log *slog.Logger, c *collect.Collector, g *group.Grouper, exp *otlp.Exporter,
+	opts otlp.Options, final bool) {
+	raw := c.Snapshot(time.Now())
+	snap, gstats := g.Apply(raw, final)
+	if len(raw.Processes) == 0 && len(snap.Processes) == 0 {
 		return
 	}
 	var kernels, linked, unlinkedByCap int64
 	var dropped uint64
-	for _, p := range snap.Processes {
+	for _, p := range raw.Processes {
 		for k, st := range p.Samples {
 			kernels += st.Count
 			if k.Linked() {
@@ -159,8 +175,13 @@ func flush(ctx context.Context, log *slog.Logger, c *collect.Collector, exp *otl
 		dropped += p.Dropped
 		unlinkedByCap += p.Unlinked
 	}
-	log.Info("interval", "processes", len(snap.Processes), "kernels", kernels, "linked_to_spans", linked,
-		"dropped", dropped, "unlinked_over_cap", unlinkedByCap)
+	var spanRows int
+	for _, p := range snap.Processes {
+		spanRows += len(p.SpanSamples)
+	}
+	log.Info("interval", "processes", len(raw.Processes), "kernels", kernels, "linked_to_spans", linked,
+		"dropped", dropped, "unlinked_over_cap", unlinkedByCap, "spans", gstats.Spans, "span_groups", gstats.Groups,
+		"exemplars", gstats.Exemplars, "spans_held", gstats.HeldBack, "span_rows", spanRows)
 	if exp == nil {
 		return
 	}

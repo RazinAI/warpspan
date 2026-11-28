@@ -9,16 +9,17 @@ It works like auto-instrumentation. You don't change the app's code: you set env
 
 ## What you see
 
-Take a request handler with three child spans: `preprocess`, `forward` and `postprocess`. With Warpspan, clicking `forward` in the trace view shows only the kernels it launched, for example `ampere_sgemm` and the GELU kernel, with their GPU time. Clicking `preprocess` shows its random-number and reduction kernels instead.
+Take a request handler with three child spans: `preprocess`, `forward` and `postprocess`. With Warpspan, clicking `forward` in the trace view shows the GPU time it launched. The slowest spans, or every span with `--span-profiles=full`, show each kernel, for example `ampere_sgemm` and the GELU kernel; others show their total and the group of similar spans they belong to ([Span profiles and cost](/docs/span-profiles)).
 
-Under the hood Pyroscope stores two profile types per process:
+Under the hood Pyroscope stores three profile types per process:
 
 | Profile type | What a sample's value is |
 | --- | --- |
 | `gpu:gpu_time:nanoseconds:gpu:nanoseconds` | GPU time of that kernel, summed over the interval |
 | `gpu:kernel_launches:count:gpu:nanoseconds` | how many times it ran |
+| `gpu:span_gpu_time:nanoseconds:gpu:nanoseconds` | the per-span view, linked to spans, for **Profiles for this span** |
 
-Each sample's stack is `cuda:<device>` then the kernel name, and it carries the trace and span IDs of the span that launched it.
+Each sample's stack is `cuda:<device>`, the NVTX ranges if any, then the kernel name. Samples of `span_gpu_time` carry the trace and span IDs of the span that launched the kernels.
 
 ## The pieces
 

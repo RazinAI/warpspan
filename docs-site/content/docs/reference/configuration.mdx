@@ -33,6 +33,8 @@ Without `OTEL_SERVICE_NAME` or a `service.name` in `OTEL_RESOURCE_ATTRIBUTES`, t
 | `--otlp-header k=v` | `OTEL_EXPORTER_OTLP_HEADERS` | | gRPC metadata. Repeat the flag for several. |
 | `--interval` | | `10s` | How often to export. |
 | `--node-name` | `NODE_NAME` | | Added as `k8s.node.name` to every profile. |
+| `--span-profiles` | | `grouped` | Per-span GPU profiles: `grouped` (about one row per span instead of one per kernel), `full` (every kernel of every span) or `off`. See [Span profiles and cost](/docs/span-profiles). |
+| `--exemplars` | | `1` | In `grouped` mode, how many of the slowest spans per process per interval keep every kernel. |
 | `--max-samples` | | `100000` | Most distinct samples (kernel × span × NVTX labels) per process per interval. A busy TensorRT app with spans and NVTX labels makes tens of thousands per second; lower `--interval` or raise this if spans show empty profiles. |
 | `--version` | | | Print the version and exit. |
 

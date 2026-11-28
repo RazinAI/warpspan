@@ -9,6 +9,9 @@
 //	resource: service.name, process.pid, host.name, k8s.*, ... (become Pyroscope labels)
 //	profile "gpu_time"        sample type gpu_time/nanoseconds, period type gpu/nanoseconds
 //	profile "kernel_launches" sample type kernel_launches/count, same period type
+//	                          (both from ProcessSnapshot.Samples: the service view)
+//	profile "span_gpu_time"   sample type span_gpu_time/nanoseconds, from SpanSamples:
+//	                          the per-span view agent/group builds, with sample links
 //	sample stack (leaf first): [kernel name, NVTX ranges innermost first..., "cuda:<device>"]
 //	sample link:  trace_id + span_id of the span that launched the kernel
 //
@@ -39,6 +42,10 @@ const (
 	PeriodType      = "gpu"
 	TimeSampleType  = "gpu_time"
 	CountSampleType = "kernel_launches"
+	// SpanTimeSampleType is the per-span view (agent/group): what Grafana's
+	// "Profiles for this span" should query. Profile type ID
+	// gpu:span_gpu_time:nanoseconds:gpu:nanoseconds.
+	SpanTimeSampleType = "span_gpu_time"
 )
 
 // MaxSamplesPerProfile bounds the samples in one profile message. Pyroscope's
@@ -55,21 +62,31 @@ const MaxSamplesPerProfile = 15000
 func BuildRequests(s *collect.Snapshot, opts Options) []*collectorpb.ExportProfilesServiceRequest {
 	var reqs []*collectorpb.ExportProfilesServiceRequest
 	for _, ps := range s.Processes {
-		keys := make([]collect.Key, 0, len(ps.Samples))
-		for k := range ps.Samples {
-			keys = append(keys, k)
-		}
-		sort.Slice(keys, func(i, j int) bool { return keyLess(keys[i], keys[j]) })
-		for lo := 0; lo < len(keys); lo += MaxSamplesPerProfile {
-			hi := min(lo+MaxSamplesPerProfile, len(keys))
-			chunk := ps
-			chunk.Samples = make(map[collect.Key]collect.Stat, hi-lo)
-			for _, k := range keys[lo:hi] {
-				chunk.Samples[k] = ps.Samples[k]
+		for _, view := range []struct {
+			samples map[collect.Key]collect.Stat
+			span    bool
+		}{{ps.Samples, false}, {ps.SpanSamples, true}} {
+			keys := make([]collect.Key, 0, len(view.samples))
+			for k := range view.samples {
+				keys = append(keys, k)
 			}
-			one := &collect.Snapshot{Start: s.Start, End: s.End, Processes: []collect.ProcessSnapshot{chunk}}
-			if req := Build(one, opts); req != nil {
-				reqs = append(reqs, req)
+			sort.Slice(keys, func(i, j int) bool { return keyLess(keys[i], keys[j]) })
+			for lo := 0; lo < len(keys); lo += MaxSamplesPerProfile {
+				hi := min(lo+MaxSamplesPerProfile, len(keys))
+				chunk := collect.ProcessSnapshot{Process: ps.Process}
+				part := make(map[collect.Key]collect.Stat, hi-lo)
+				for _, k := range keys[lo:hi] {
+					part[k] = view.samples[k]
+				}
+				if view.span {
+					chunk.SpanSamples = part
+				} else {
+					chunk.Samples = part
+				}
+				one := &collect.Snapshot{Start: s.Start, End: s.End, Processes: []collect.ProcessSnapshot{chunk}}
+				if req := Build(one, opts); req != nil {
+					reqs = append(reqs, req)
+				}
 			}
 		}
 	}
@@ -91,49 +108,15 @@ func Build(s *collect.Snapshot, opts Options) *collectorpb.ExportProfilesService
 	frames := map[string]string{} // kernel name -> frame; many samples share a kernel
 
 	for _, ps := range s.Processes {
-		if len(ps.Samples) == 0 {
+		profiles := d.profiles(ps.Samples, frames, []valueType{
+			{TimeSampleType, "nanoseconds", func(st collect.Stat) int64 { return st.TotalNs }},
+			{CountSampleType, "count", func(st collect.Stat) int64 { return st.Count }},
+		}, start, duration)
+		profiles = append(profiles, d.profiles(ps.SpanSamples, frames, []valueType{
+			{SpanTimeSampleType, "nanoseconds", func(st collect.Stat) int64 { return st.TotalNs }},
+		}, start, duration)...)
+		if len(profiles) == 0 {
 			continue
-		}
-		keys := make([]collect.Key, 0, len(ps.Samples))
-		for k := range ps.Samples {
-			keys = append(keys, k)
-		}
-		sort.Slice(keys, func(i, j int) bool { return keyLess(keys[i], keys[j]) })
-
-		// Pyroscope rejects a whole profile above max_profile_stacktrace_samples
-		// (16000 by default), so samples are split over several profile pairs.
-		// Chunks follow key order, so one span can span two profiles; that
-		// relies on Pyroscope merging profiles of the same series and time.
-		var profiles []*profilespb.Profile
-		var timeProfile, countProfile *profilespb.Profile
-		for i, k := range keys {
-			if i%MaxSamplesPerProfile == 0 {
-				timeProfile = d.newProfile(TimeSampleType, "nanoseconds", start, duration)
-				countProfile = d.newProfile(CountSampleType, "count", start, duration)
-				profiles = append(profiles, timeProfile, countProfile)
-			}
-			st := ps.Samples[k]
-			frame, ok := frames[k.Name]
-			if !ok {
-				frame = kernelFrame(k.Name)
-				frames[k.Name] = frame
-			}
-			labels := k.LabelList()
-			stackFrames := make([]string, 0, len(labels)+2)
-			stackFrames = append(stackFrames, frame)
-			for j := len(labels) - 1; j >= 0; j-- {
-				stackFrames = append(stackFrames, labels[j])
-			}
-			stackFrames = append(stackFrames, fmt.Sprintf("cuda:%d", k.Device))
-			stack := d.stack(stackFrames)
-			var link int32
-			if k.Linked() {
-				link = d.link(k.TraceID, k.SpanID)
-			}
-			timeProfile.Samples = append(timeProfile.Samples,
-				&profilespb.Sample{StackIndex: stack, Values: []int64{st.TotalNs}, LinkIndex: link})
-			countProfile.Samples = append(countProfile.Samples,
-				&profilespb.Sample{StackIndex: stack, Values: []int64{st.Count}, LinkIndex: link})
 		}
 
 		res := &resourcepb.Resource{}
@@ -155,6 +138,62 @@ func Build(s *collect.Snapshot, opts Options) *collectorpb.ExportProfilesService
 		return nil
 	}
 	return req
+}
+
+type valueType struct {
+	sampleType, unit string
+	value            func(collect.Stat) int64
+}
+
+// profiles builds one profile per value type from samples, split so none has
+// more than MaxSamplesPerProfile samples: Pyroscope rejects a whole profile
+// above max_profile_stacktrace_samples (16000 by default). Chunks follow key
+// order, so one span can span two profiles; that relies on Pyroscope merging
+// profiles of the same series and time.
+func (d *dict) profiles(samples map[collect.Key]collect.Stat, frames map[string]string, types []valueType,
+	start, duration uint64) []*profilespb.Profile {
+	if len(samples) == 0 {
+		return nil
+	}
+	keys := make([]collect.Key, 0, len(samples))
+	for k := range samples {
+		keys = append(keys, k)
+	}
+	sort.Slice(keys, func(i, j int) bool { return keyLess(keys[i], keys[j]) })
+
+	var out, cur []*profilespb.Profile
+	for i, k := range keys {
+		if i%MaxSamplesPerProfile == 0 {
+			cur = make([]*profilespb.Profile, len(types))
+			for t, vt := range types {
+				cur[t] = d.newProfile(vt.sampleType, vt.unit, start, duration)
+			}
+			out = append(out, cur...)
+		}
+		st := samples[k]
+		frame, ok := frames[k.Name]
+		if !ok {
+			frame = kernelFrame(k.Name)
+			frames[k.Name] = frame
+		}
+		labels := k.LabelList()
+		stackFrames := make([]string, 0, len(labels)+2)
+		stackFrames = append(stackFrames, frame)
+		for j := len(labels) - 1; j >= 0; j-- {
+			stackFrames = append(stackFrames, labels[j])
+		}
+		stackFrames = append(stackFrames, fmt.Sprintf("cuda:%d", k.Device))
+		stack := d.stack(stackFrames)
+		var link int32
+		if k.Linked() {
+			link = d.link(k.TraceID, k.SpanID)
+		}
+		for t, vt := range types {
+			cur[t].Samples = append(cur[t].Samples,
+				&profilespb.Sample{StackIndex: stack, Values: []int64{vt.value(st)}, LinkIndex: link})
+		}
+	}
+	return out
 }
 
 func keyLess(a, b collect.Key) bool {
